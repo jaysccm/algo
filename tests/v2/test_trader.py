@@ -3128,6 +3128,19 @@ def test_cli_decisions_file_exit_one_on_errors(tmp_path):
         assert trader.main() == 1
 
 
+def test_cli_input_file_without_decisions_file_rejected(tmp_path):
+    """--input-file alone must not fall through to the full API-path
+    run_trading_session, which is a real model call and real orders."""
+    i = tmp_path / "i.json"; i.write_text(json.dumps(_prepared()))  # noqa: E702
+    with patch("v2.trader.run_trading_session") as run_session, \
+         patch("sys.argv", ["trader", "--input-file", str(i)]), \
+         patch("v2.log_config.setup_logging"):
+        with pytest.raises(SystemExit) as exc_info:
+            trader.main()
+        assert exc_info.value.code == 2
+    run_session.assert_not_called()
+
+
 # --- Fail-closed guards on the file path ---
 
 def _assert_refused(out, execute, parse=None, fragment=""):

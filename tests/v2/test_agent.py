@@ -827,6 +827,8 @@ def test_executor_input_round_trips_through_dict():
     json.dumps(data, default=str)  # must be JSON-serialisable with the same default the API path uses
     back = agent.executor_input_from_dict(json.loads(json.dumps(data, default=str)))
     assert back.playbook_actions[0].ticker == "AAPL"
+    assert back.playbook_actions[0].intent_magnitude == Decimal("500")
+    assert isinstance(back.playbook_actions[0].intent_magnitude, Decimal)
     assert back.current_prices["AAPL"] == Decimal("190.25")
     assert back.account == ei.account
 

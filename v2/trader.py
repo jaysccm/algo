@@ -1809,6 +1809,9 @@ def main():
             return 3
         return 0
 
+    if args.input_file and not args.decisions_file:
+        parser.error("--input-file requires --decisions-file")
+
     if args.decisions_file:
         if not args.input_file:
             parser.error("--decisions-file requires --input-file")

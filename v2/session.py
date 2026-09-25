@@ -220,6 +220,16 @@ def _dashboard_publish_enabled() -> bool:
     )
 
 
+class _ResumeRefused(Exception):
+    """Raised by _check_and_record_session when --resume can't establish
+    which stages a prior run already completed (the lookup or the reopen
+    itself failed). Falling back to a fresh/untracked run here would rerun
+    every stage — including the strategist — and write a second playbook,
+    theses, and memo for the day: the exact duplication the idempotency
+    gate exists to prevent. run_session catches this and turns it into a
+    SessionResult.refused instead of proceeding."""
+
+
 def _check_and_record_session(force: bool, session_date, resume: bool = False) -> tuple[int | None, set, str | None]:
     """Returns (session_id, completed_stages, early_error).
 
@@ -237,21 +247,23 @@ def _check_and_record_session(force: bool, session_date, resume: bool = False) -
     set. Failed sessions gate too: a cron double-fire after a partial
     failure would otherwise expire the first run's pending playbook actions
     and re-run the strategist, duplicating playbooks/theses for the date.
+
+    Under --resume, any exception while looking up or reopening the prior
+    row raises _ResumeRefused rather than silently falling back to a fresh
+    or untracked run (see _ResumeRefused).
     """
     if resume:
         try:
             existing = get_session_for_date(session_date)
         except Exception as e:
-            logger.warning("Could not look up session to resume: %s — starting a new one", e)
-            existing = None
+            raise _ResumeRefused(f"Could not look up session to resume: {e}") from e
         if existing:
             session_id = existing["id"]
             try:
                 completed = get_completed_stages(session_id)
                 reopen_session(session_id)
             except Exception as e:
-                logger.warning("Could not resume session %s: %s — proceeding without tracking", session_id, e)
-                return None, set(), None
+                raise _ResumeRefused(f"Could not resume session {session_id}: {e}") from e
             logger.info("Resuming session %d (was %s); completed stages: %s",
                         session_id, existing.get("status"), ", ".join(sorted(completed)) or "none")
             return session_id, completed, None
@@ -708,7 +720,13 @@ def run_session(
     except Exception as e:
         logger.warning("expire_stale_playbook_actions failed (non-fatal): %s", e)
 
-    session_id, completed_stages, early_error = _check_and_record_session(force, today, resume=resume)
+    try:
+        session_id, completed_stages, early_error = _check_and_record_session(force, today, resume=resume)
+    except _ResumeRefused as e:
+        result.refused = str(e)
+        logger.error("%s", result.refused)
+        result.duration_seconds = time.monotonic() - start
+        return result
     if early_error:
         # T2.1: idempotent skip is not a failure. main() reads this field
         # and exits 0 with a "nothing to do" log line.

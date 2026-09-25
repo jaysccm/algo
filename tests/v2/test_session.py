@@ -709,6 +709,77 @@ class TestSessionIdempotency:
         mock_insert.assert_not_called()
         mock_reopen.assert_not_called()
 
+    def test_resume_lookup_exception_is_refused(self):
+        """If get_session_for_date raises under --resume, we cannot know which
+        stages already completed. Falling back to a fresh/untracked run would
+        rerun the strategist and duplicate the day's playbook/theses/memo —
+        the exact duplication the idempotency gate exists to prevent. Must
+        refuse instead: nothing runs, no row is touched."""
+        with patch("v2.session.get_session_for_date", side_effect=RuntimeError("db dead")) as mock_get, \
+             patch("v2.session.insert_session_record") as mock_insert, \
+             patch("v2.session.reopen_session") as mock_reopen, \
+             patch("v2.session.complete_session") as mock_complete, \
+             patch("v2.session.fail_session") as mock_fail, \
+             patch("v2.session.insert_session_stage") as mock_stage, \
+             patch("v2.session.expire_stale_playbook_actions") as mock_expire, \
+             patch("v2.session.run_backfill") as mock_backfill, \
+             patch("v2.session.run_pipeline") as mock_pipeline, \
+             patch("v2.session.run_strategist_loop") as mock_strategist, \
+             patch("v2.session.run_trading_session") as mock_trader:
+            result = run_session(dry_run=False, resume=True)
+        assert result.refused
+        assert result.idempotent_skip is None
+        assert result.has_errors is True
+        mock_get.assert_called_once()
+        # mock_expire is patched only to avoid a real DB call; it runs as
+        # unconditional pre-check cleanup and is unrelated to this refusal.
+        for m in (mock_insert, mock_reopen, mock_complete, mock_fail,
+                  mock_stage, mock_backfill, mock_pipeline,
+                  mock_strategist, mock_trader):
+            m.assert_not_called()
+
+    def test_resume_reopen_exception_is_refused(self):
+        """A prior row exists, but get_completed_stages/reopen_session fails
+        under --resume: same risk as the lookup exception above — we can't
+        trust which stages are done, so refuse rather than run everything
+        untracked."""
+        with patch("v2.session.get_session_for_date", return_value={"id": 7, "status": "failed"}), \
+             patch("v2.session.get_completed_stages", side_effect=RuntimeError("db dead")), \
+             patch("v2.session.insert_session_record") as mock_insert, \
+             patch("v2.session.reopen_session") as mock_reopen, \
+             patch("v2.session.complete_session") as mock_complete, \
+             patch("v2.session.fail_session") as mock_fail, \
+             patch("v2.session.insert_session_stage") as mock_stage, \
+             patch("v2.session.expire_stale_playbook_actions") as mock_expire, \
+             patch("v2.session.run_backfill") as mock_backfill, \
+             patch("v2.session.run_pipeline") as mock_pipeline, \
+             patch("v2.session.run_strategist_loop") as mock_strategist, \
+             patch("v2.session.run_trading_session") as mock_trader:
+            result = run_session(dry_run=False, resume=True)
+        assert result.refused
+        assert result.idempotent_skip is None
+        assert result.has_errors is True
+        # mock_expire is patched only to avoid a real DB call; it runs as
+        # unconditional pre-check cleanup and is unrelated to this refusal.
+        for m in (mock_insert, mock_reopen, mock_complete, mock_fail,
+                  mock_stage, mock_backfill, mock_pipeline,
+                  mock_strategist, mock_trader):
+            m.assert_not_called()
+
+    def test_main_exits_nonzero_for_resume_lookup_exception(self):
+        import sys
+
+        from v2.session import main
+        with patch.object(sys, "argv", ["session", "--resume"]), \
+             patch("v2.session.setup_logging"), \
+             patch("v2.session.get_session_for_date", side_effect=RuntimeError("db dead")), \
+             patch("v2.session.insert_session_record") as mock_insert, \
+             patch("v2.session.reopen_session") as mock_reopen, pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code != 0
+        mock_insert.assert_not_called()
+        mock_reopen.assert_not_called()
+
     def test_main_accepts_resume_flag(self):
         import sys
 

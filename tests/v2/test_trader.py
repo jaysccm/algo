@@ -3081,12 +3081,15 @@ def test_execute_decisions_payload_runs_money_path_in_order():
 
 
 def test_execute_decisions_payload_rechecks_breaker_before_orders():
+    live = {**_prepared(), "dry_run": False}
     with patch("v2.trader.parse_executor_response") as parse, \
+         patch("v2.trader._today_et", return_value=date(2026, 9, 22)), \
+         patch("v2.trader.is_market_open", return_value=True), \
          patch("v2.trader.get_account_info", return_value={"equity": 900.0, "last_equity": 1000.0}), \
          patch("v2.trader.check_daily_loss_limit", return_value="down 10%"), \
          patch("v2.trader.record_event"), \
          patch("v2.trader._execute_decisions") as execute:
-        out = trader.execute_decisions_payload({"decisions": []}, _prepared(), dry_run=False, session_id=1)
+        out = trader.execute_decisions_payload({"decisions": []}, live, dry_run=False, session_id=1)
     assert "down 10%" in out.errors
     parse.assert_not_called()
     execute.assert_not_called()
@@ -3123,3 +3126,111 @@ def test_cli_decisions_file_exit_one_on_errors(tmp_path):
          patch("sys.argv", ["trader", "--decisions-file", str(d), "--input-file", str(i), "--dry-run"]), \
          patch("v2.log_config.setup_logging"):
         assert trader.main() == 1
+
+
+# --- Fail-closed guards on the file path ---
+
+def _assert_refused(out, execute, parse=None, fragment=""):
+    assert any(fragment in e for e in out.errors), out.errors
+    assert out.decisions_made == 0 and out.trades_executed == 0
+    execute.assert_not_called()
+    if parse is not None:
+        parse.assert_not_called()
+
+
+def test_execute_decisions_payload_refuses_skipped_prepared_input():
+    prepared = {**_prepared(), "skipped": "market_closed"}
+    with patch("v2.trader.get_account_info") as acct, \
+         patch("v2.trader.parse_executor_response") as parse, \
+         patch("v2.trader._execute_decisions") as execute:
+        out = trader.execute_decisions_payload({"decisions": []}, prepared, dry_run=True, session_id=1)
+    _assert_refused(out, execute, parse, "skipped (market_closed)")
+    acct.assert_not_called()
+
+
+def test_execute_decisions_payload_account_read_failure_is_error():
+    with patch("v2.trader.get_account_info", side_effect=RuntimeError("alpaca down")), \
+         patch("v2.trader.parse_executor_response") as parse, \
+         patch("v2.trader._execute_decisions") as execute:
+        out = trader.execute_decisions_payload({"decisions": []}, _prepared(), dry_run=True, session_id=1)
+    _assert_refused(out, execute, parse, "Account read failed: alpaca down")
+
+
+def test_execute_decisions_payload_non_valueerror_parse_failure_is_error():
+    with patch("v2.trader.get_account_info", return_value={"equity": 1.0, "last_equity": 1.0}), \
+         patch("v2.trader.check_daily_loss_limit", return_value=None), \
+         patch("v2.trader.parse_executor_response", side_effect=AttributeError("'list' has no .get")), \
+         patch("v2.trader._execute_decisions") as execute:
+        out = trader.execute_decisions_payload([], _prepared(), dry_run=True, session_id=1)
+    _assert_refused(out, execute, fragment="LLM decision failed")
+
+
+def _live_gate_patches(stack, *, today=date(2026, 9, 22), market_open=True):
+    mocks = {
+        "acct": stack.enter_context(patch("v2.trader.get_account_info")),
+        "breaker": stack.enter_context(patch("v2.trader.check_daily_loss_limit", return_value=None)),
+        "parse": stack.enter_context(patch("v2.trader.parse_executor_response")),
+        "execute": stack.enter_context(patch("v2.trader._execute_decisions")),
+        "market": stack.enter_context(patch("v2.trader.is_market_open", return_value=market_open)),
+    }
+    stack.enter_context(patch("v2.trader._today_et", return_value=today))
+    return mocks
+
+
+def _assert_live_refused(prepared, fragment, **gate_kwargs):
+    with ExitStack() as stack:
+        m = _live_gate_patches(stack, **gate_kwargs)
+        out = trader.execute_decisions_payload({"decisions": []}, prepared, dry_run=False, session_id=1)
+    _assert_refused(out, m["execute"], m["parse"], fragment)
+    m["acct"].assert_not_called()
+    m["breaker"].assert_not_called()
+
+
+def test_live_replay_refuses_dry_run_prepared_input():
+    _assert_live_refused({**_prepared(), "dry_run": True}, "dry-run mode")
+
+
+def test_live_replay_refuses_prepared_input_without_dry_run_flag():
+    _assert_live_refused(_prepared(), "dry-run mode")  # legacy file: no dry_run key
+
+
+def test_live_replay_refuses_stale_session_date():
+    _assert_live_refused({**_prepared(), "dry_run": False}, "stale", today=date(2026, 9, 23))
+
+
+def test_live_replay_refuses_when_market_closed():
+    _assert_live_refused({**_prepared(), "dry_run": False}, "Market is closed", market_open=False)
+
+
+def test_dry_run_replay_skips_live_gates():
+    """dry_run=True proceeds on a dry-run, stale input with the market closed."""
+    resp = AgentResponse(decisions=[], thesis_invalidations=[], market_summary="m", risk_assessment="r")
+    prepared = {**_prepared(), "dry_run": True}
+    with ExitStack() as stack:
+        m = _live_gate_patches(stack, today=date(2026, 12, 1), market_open=False)
+        m["acct"].return_value = {"equity": 1.0, "last_equity": 1.0}
+        m["parse"].return_value = resp
+        m["execute"].return_value = (MagicMock(), {}, {}, {})
+        stack.enter_context(patch("v2.trader._validate_llm_ids"))
+        stack.enter_context(patch("v2.trader.get_positions", return_value=[]))
+        stack.enter_context(patch("v2.trader._build_stock_data_client"))
+        stack.enter_context(patch("v2.trader._handle_thesis_invalidations"))
+        stack.enter_context(patch("v2.trader._log_decisions", return_value=0))
+        stack.enter_context(patch("v2.trader._log_session_summary"))
+        stack.enter_context(patch("v2.trader._build_final_result", return_value="final"))
+        out = trader.execute_decisions_payload({"decisions": []}, prepared, dry_run=True, session_id=1)
+    assert out == "final"
+    m["execute"].assert_called_once()
+    m["market"].assert_not_called()
+
+
+def test_prepare_executor_stage_records_dry_run():
+    with patch("v2.trader._sync_from_alpaca", return_value=(0, 0)), \
+         patch("v2.trader.is_market_open", return_value=False):
+        live = trader.prepare_executor_stage(dry_run=False, session_id=1, session_date=date(2026, 9, 22))
+    assert live["dry_run"] is False
+    with patch("v2.trader._sync_from_alpaca", return_value=(0, 0)), \
+         patch("v2.trader._build_stock_data_client"), \
+         patch("v2.trader._snapshot_account", return_value=(None, 0)):
+        dry = trader.prepare_executor_stage(dry_run=True, session_id=1, session_date=date(2026, 9, 22))
+    assert dry["dry_run"] is True

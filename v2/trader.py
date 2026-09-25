@@ -1512,7 +1512,7 @@ def _prepare_stage(
     prepared = {
         "skipped": None, "executor_input": None, "account_info": None, "snapshot_id": 0,
         "positions_synced": 0, "orders_synced": 0, "session_date": session_date.isoformat(),
-        "errors": errors,
+        "dry_run": dry_run, "errors": errors,
     }
     stage = _PreparedStage(prepared=prepared)
 
@@ -1609,6 +1609,33 @@ def prepare_executor_stage(
     return stage.prepared
 
 
+def _today_et() -> date:
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
+def _live_replay_refusal(prepared: dict, session_date: date) -> str | None:
+    """Gates a live (non-dry-run) file replay must pass before any order.
+
+    The prepared input may have been written in dry-run mode (which bypasses
+    the market-hours gate) or on an earlier day (stale playbook, prices, and
+    a session_date that feeds client_order_id signing and dedup). Refuse
+    fail-closed in either case, and re-check market hours because the model
+    call happened between prepare and execute. A missing dry_run key is
+    treated as a dry-run input.
+    """
+    if prepared.get("dry_run", True):
+        return "Prepared input was written in dry-run mode; refusing live execution"
+    today = _today_et()
+    if session_date != today:
+        return (
+            f"Prepared input is stale (session_date {session_date.isoformat()} "
+            f"!= today {today.isoformat()} ET); refusing live execution"
+        )
+    if not is_market_open():
+        return "Market is closed; refusing live execution of prepared input"
+    return None
+
+
 def execute_decisions_payload(
     decisions: dict, prepared: dict, *, dry_run: bool, session_id: int | None,
 ) -> TradingSessionResult:
@@ -1629,6 +1656,13 @@ def execute_decisions_payload(
         errors.append(f"Prepared input was skipped ({prepared['skipped']}); refusing to execute")
         logger.error("Refusing to execute: prepared input was skipped (%s)", prepared["skipped"])
         return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+
+    if not dry_run:
+        refusal = _live_replay_refusal(prepared, session_date)
+        if refusal:
+            errors.append(refusal)
+            logger.error("Refusing to execute: %s", refusal)
+            return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
 
     try:
         account_info = get_account_info()

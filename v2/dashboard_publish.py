@@ -50,11 +50,14 @@ from .database.trading_db import (
     get_signal_attribution,
 )
 from .executor import get_net_deposits
+from .prompts import load_prompt
 
 logger = logging.getLogger("dashboard_publish")
 
 # Path to static assets directory (relative to project root)
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "public_dashboard")
+
+CHANGELOG_SYSTEM_PROMPT = load_prompt("changelog")
 
 
 def _redact_order_id(order_id):
@@ -1290,21 +1293,7 @@ def _changelog_prompt(commits: list[dict]) -> str:
         }
         for c in commits
     ]
-    return (
-        "You are writing a public changelog for Pinchy, an AI trading dashboard.\n\n"
-        "Audience: people following a public AI-operated trading account.\n\n"
-        "Create public product notes from these repository commits. Group related "
-        "commits into meaningful entries. Ignore internal-only cleanup unless it "
-        "changes reliability, transparency, safety, publishing, dashboard UX, or "
-        "trading behavior. Do not invent user-visible behavior. Do not mention raw "
-        "implementation details unless they explain a user-facing change or safety "
-        "improvement.\n\n"
-        "Return JSON only in this shape:\n"
-        '{"entries":[{"title":"Short public title","summary":"One sentence summary",'
-        '"bullets":["Specific readable note"],"commit_shas":["full_sha"]}]}\n\n'
-        "Commits:\n"
-        f"{json.dumps(payload, indent=2)}"
-    )
+    return json.dumps(payload, indent=2)
 
 
 def validate_changelog_entries(raw_entries: list[dict], commits: list[dict]) -> list[dict]:
@@ -1345,7 +1334,7 @@ def summarize_changelog_commits(commits: list[dict],
             model=model,
             max_tokens=2000,
             temperature=0,
-            system="Return strict JSON only. Do not wrap the response in markdown.",
+            system=CHANGELOG_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _changelog_prompt(commits)}],
             stage_name="dashboard_publish",
             purpose="changelog_summary",

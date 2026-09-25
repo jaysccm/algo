@@ -11,6 +11,7 @@ from .claude_client import AgentPurpose, extract_final_text, get_claude_client, 
 from .context import get_equity_summary
 from .formation import build_formation_context, get_orphan_positions
 from .pricing import UnknownModelError, stage_cost_usd
+from .prompts import load_prompt
 from .tools import (
     TOOL_DEFINITIONS,
     TOOL_HANDLERS,
@@ -138,12 +139,10 @@ CLAUDE_STRATEGIST_SYSTEM = _STRATEGIST_TEMPLATE.format(
     executor_note="",
 )
 
-CLAUDE_SESSION_STRATEGIST_SYSTEM = _STRATEGIST_TEMPLATE.format(
-    timing="before market close",
-    review_scope="the portfolio",
-    date_ref="today's",
-    executor_note=" that runs immediately after you",
-)
+# The session (pre-close) variant is the file; the post-close variant
+# CLAUDE_STRATEGIST_SYSTEM stays a rendered template for run_strategist_session.
+# tests/v2/test_prompts.py asserts the file equals the rendered template.
+CLAUDE_SESSION_STRATEGIST_SYSTEM = load_prompt("strategist")
 
 
 @dataclass

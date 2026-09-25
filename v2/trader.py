@@ -18,8 +18,11 @@ from .agent import (
     DEFAULT_EXECUTOR_MODEL,
     ExecutorDecision,
     ExecutorInput,
+    executor_input_from_dict,
+    executor_input_to_dict,
     format_decisions_for_logging,
     get_trading_decisions,
+    parse_executor_response,
     validate_signal_refs,
 )
 from .context import build_executor_input
@@ -1459,90 +1462,100 @@ def _log_decisions(
     return logged_count
 
 
-def run_trading_session(
-    dry_run: bool = False,
-    model: str = DEFAULT_EXECUTOR_MODEL,
-    session_id: int | None = None,
-    session_date: date | None = None,
-) -> TradingSessionResult:
+def _check_daily_loss_breaker(
+    account_info: dict, errors: list[str], session_id: int | None,
+) -> bool:
+    """Daily-loss circuit breaker. Returns True when the stage must halt.
+
+    The single breaker implementation shared by the API path (via
+    _prepare_stage) and the file path (execute_decisions_payload's re-check).
+    Recorded as an error so the session is marked failed and the halt is loud.
     """
-    Run a complete trading session.
-
-    1. Sync positions from Alpaca
-    2. Take account snapshot
-    3. Build executor input (structured)
-    4. Get decisions from Claude Haiku
-    5. Validate and execute trades
-    6. Log decisions to database
-
-    Args:
-        dry_run: If True, don't execute real trades
-        model: Claude model to use for decisions
-
-    Returns:
-        TradingSessionResult with session details
-    """
-    errors: list[str] = []
-    timestamp = datetime.now()
-    # T2.10: capture session date once, in market-local time. Every later
-    # callsite (client_order_id signing, dedup checks, decision row
-    # insertion) reuses this value so a session that runs across midnight
-    # ET still shows up as a single trading day.
-    if session_date is None:
-        session_date = datetime.now(ZoneInfo("America/New_York")).date()
-
-    logger.info(
-        "Starting trading session (dry_run=%s, model=%s, session_date=%s)",
-        dry_run, model, session_date,
+    loss_breach = check_daily_loss_limit(
+        account_info.get("equity"), account_info.get("last_equity"),
     )
+    if not loss_breach:
+        return False
+    errors.append(loss_breach)
+    logger.error("HALT: %s", loss_breach)
+    record_event(
+        session_id=session_id,
+        stage_name="trading",
+        event_type="risk_block",
+        payload={"reason_code": "daily_loss_limit", "reason_text": loss_breach},
+    )
+    return True
+
+
+@dataclass
+class _PreparedStage:
+    """Outcome of steps 1-3, shared by run_trading_session and prepare_executor_stage.
+
+    `prepared` is the JSON-serialisable dict (its `executor_input` is left None
+    here; only prepare_executor_stage serialises it). The in-memory objects let
+    the API path carry on without a dict round-trip.
+    """
+    prepared: dict
+    executor_input: ExecutorInput | None = None
+    data_client: object = None
+    account_info: dict | None = None
+
+
+def _prepare_stage(
+    *, dry_run: bool, session_id: int | None, session_date: date, errors: list[str],
+) -> _PreparedStage:
+    """Steps 1-3: sync, market gate, snapshot, daily-loss breaker, executor input.
+
+    `prepared["skipped"]` is "market_closed" / "no_account" / "daily_loss_limit"
+    when the stage must not call the model at all.
+    """
+    prepared = {
+        "skipped": None, "executor_input": None, "account_info": None, "snapshot_id": 0,
+        "positions_synced": 0, "orders_synced": 0, "session_date": session_date.isoformat(),
+        "errors": errors,
+    }
+    stage = _PreparedStage(prepared=prepared)
 
     # Step 1: Sync positions and orders
     logger.info("[Step 1] Syncing positions and orders from Alpaca")
-    positions_synced, orders_synced = _sync_from_alpaca(errors)
+    prepared["positions_synced"], prepared["orders_synced"] = _sync_from_alpaca(errors)
 
     # Market hours gate — skip trading if market is closed (dry_run bypasses)
     if not dry_run and not is_market_open():
         logger.warning("Market is closed. Skipping trading session (use --dry-run to bypass)")
-        return _empty_result(
-            timestamp, positions_synced, orders_synced, 0, errors,
-            market_closed=True,
-        )
+        prepared["skipped"] = "market_closed"
+        return stage
 
-    data_client = _build_stock_data_client()
+    stage.data_client = _build_stock_data_client()
 
     # Step 2: Take account snapshot
     logger.info("[Step 2] Taking account snapshot")
     account_info, snapshot_id = _snapshot_account(errors)
     if account_info is None:
-        return _empty_result(timestamp, positions_synced, orders_synced, 0, errors)
+        prepared["skipped"] = "no_account"
+        return stage
+    prepared["snapshot_id"] = snapshot_id
+    prepared["account_info"] = account_info
+    stage.account_info = account_info
 
     # Daily-loss circuit breaker: halt the entire stage when equity has
-    # already dropped past the limit vs the previous close. Recorded as an
-    # error so the session is marked failed and the halt is loud.
-    loss_breach = check_daily_loss_limit(
-        account_info.get("equity"), account_info.get("last_equity"),
-    )
-    if loss_breach:
-        errors.append(loss_breach)
-        logger.error("HALT: %s", loss_breach)
-        record_event(
-            session_id=session_id,
-            stage_name="trading",
-            event_type="risk_block",
-            payload={"reason_code": "daily_loss_limit", "reason_text": loss_breach},
-        )
-        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+    # already dropped past the limit vs the previous close.
+    if _check_daily_loss_breaker(account_info, errors, session_id):
+        prepared["skipped"] = "daily_loss_limit"
+        return stage
 
     # Step 3: Build executor input (structured, not string)
     logger.info("[Step 3] Building executor input")
-    executor_input = _build_executor_context(account_info, data_client, errors)
+    stage.executor_input = _build_executor_context(account_info, stage.data_client, errors)
+    return stage
 
-    # Step 4: Get LLM decisions
-    logger.info("[Step 4] Getting trading decisions from executor")
-    response = _get_decisions(executor_input, model, errors, session_id=session_id)
-    if response is None:
-        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
 
+def _run_decisions(
+    response, executor_input, account_info: dict, data_client, *,
+    dry_run: bool, errors: list[str], session_date: date, session_id: int | None,
+    timestamp: datetime, snapshot_id: int, positions_synced: int, orders_synced: int,
+) -> TradingSessionResult:
+    """Steps 5-6 on an already-parsed AgentResponse: the shared money path."""
     # A.6/D.3: scrub LLM-authored DB pointers before anything acts on them.
     _validate_llm_ids(response, executor_input, session_id=session_id)
 
@@ -1575,8 +1588,161 @@ def run_trading_session(
     )
 
 
+def prepare_executor_stage(
+    *, dry_run: bool, session_id: int | None, session_date: date | None,
+) -> dict:
+    """Steps 1-3 of run_trading_session, exposed for file-based replay.
+
+    Syncs, gates on market hours, snapshots, runs the daily-loss breaker, and
+    builds the executor input. Returns a JSON-serialisable dict (with
+    json.dumps(default=str)); `skipped` is "market_closed" /
+    "daily_loss_limit" / "no_account" when the stage should not call the
+    model at all.
+    """
+    if session_date is None:
+        session_date = datetime.now(ZoneInfo("America/New_York")).date()
+    stage = _prepare_stage(
+        dry_run=dry_run, session_id=session_id, session_date=session_date, errors=[],
+    )
+    if stage.executor_input is not None:
+        stage.prepared["executor_input"] = executor_input_to_dict(stage.executor_input)
+    return stage.prepared
+
+
+def execute_decisions_payload(
+    decisions: dict, prepared: dict, *, dry_run: bool, session_id: int | None,
+) -> TradingSessionResult:
+    """Steps 4-6 of run_trading_session from a decoded executor payload.
+
+    The breaker is re-checked against a fresh account read before any order,
+    because the model call happened between prepare and execute. The fresh
+    account read is also what sizing runs against.
+    """
+    errors: list[str] = list(prepared.get("errors") or [])
+    timestamp = datetime.now()
+    session_date = date.fromisoformat(prepared["session_date"])
+    positions_synced = prepared["positions_synced"]
+    orders_synced = prepared["orders_synced"]
+    snapshot_id = prepared["snapshot_id"]
+
+    if prepared.get("skipped"):
+        errors.append(f"Prepared input was skipped ({prepared['skipped']}); refusing to execute")
+        logger.error("Refusing to execute: prepared input was skipped (%s)", prepared["skipped"])
+        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+
+    try:
+        account_info = get_account_info()
+    except Exception as e:
+        errors.append(f"Account read failed: {e}")
+        logger.error("Account read failed: %s", e, exc_info=True)
+        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+
+    if _check_daily_loss_breaker(account_info, errors, session_id):
+        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+
+    # Step 4 (file path): parse the structured payload exactly as the API path does.
+    logger.info("[Step 4] Parsing executor decisions payload")
+    try:
+        response = parse_executor_response(
+            decisions, raw_text=json.dumps(decisions, default=str),
+            stop_reason="end_turn", session_id=session_id,
+        )
+        logger.info("Received %d decisions", len(response.decisions))
+    except Exception as e:
+        errors.append(f"LLM decision failed: {e}")
+        logger.error("LLM decision failed: %s", e, exc_info=True)
+        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+
+    executor_input = executor_input_from_dict(prepared["executor_input"])
+    data_client = _build_stock_data_client()
+    return _run_decisions(
+        response, executor_input, account_info, data_client,
+        dry_run=dry_run, errors=errors, session_date=session_date, session_id=session_id,
+        timestamp=timestamp, snapshot_id=snapshot_id,
+        positions_synced=positions_synced, orders_synced=orders_synced,
+    )
+
+
+def run_trading_session(
+    dry_run: bool = False,
+    model: str = DEFAULT_EXECUTOR_MODEL,
+    session_id: int | None = None,
+    session_date: date | None = None,
+) -> TradingSessionResult:
+    """
+    Run a complete trading session.
+
+    1. Sync positions from Alpaca
+    2. Take account snapshot
+    3. Build executor input (structured)
+    4. Get decisions from Claude Haiku
+    5. Validate and execute trades
+    6. Log decisions to database
+
+    Composed from _prepare_stage (steps 1-3, incl. the daily-loss breaker)
+    and _run_decisions (steps 5-6), the same pieces prepare_executor_stage /
+    execute_decisions_payload use, so the API and file paths cannot drift.
+
+    Args:
+        dry_run: If True, don't execute real trades
+        model: Claude model to use for decisions
+
+    Returns:
+        TradingSessionResult with session details
+    """
+    errors: list[str] = []
+    timestamp = datetime.now()
+    # T2.10: capture session date once, in market-local time. Every later
+    # callsite (client_order_id signing, dedup checks, decision row
+    # insertion) reuses this value so a session that runs across midnight
+    # ET still shows up as a single trading day.
+    if session_date is None:
+        session_date = datetime.now(ZoneInfo("America/New_York")).date()
+
+    logger.info(
+        "Starting trading session (dry_run=%s, model=%s, session_date=%s)",
+        dry_run, model, session_date,
+    )
+
+    stage = _prepare_stage(
+        dry_run=dry_run, session_id=session_id, session_date=session_date, errors=errors,
+    )
+    prepared = stage.prepared
+    positions_synced = prepared["positions_synced"]
+    orders_synced = prepared["orders_synced"]
+    snapshot_id = prepared["snapshot_id"]
+    skipped = prepared["skipped"]
+    if skipped == "market_closed":
+        return _empty_result(
+            timestamp, positions_synced, orders_synced, 0, errors,
+            market_closed=True,
+        )
+    if skipped == "no_account":
+        return _empty_result(timestamp, positions_synced, orders_synced, 0, errors)
+    if skipped == "daily_loss_limit":
+        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+
+    # Step 4: Get LLM decisions
+    logger.info("[Step 4] Getting trading decisions from executor")
+    response = _get_decisions(stage.executor_input, model, errors, session_id=session_id)
+    if response is None:
+        return _empty_result(timestamp, positions_synced, orders_synced, snapshot_id, errors)
+
+    return _run_decisions(
+        response, stage.executor_input, stage.account_info, stage.data_client,
+        dry_run=dry_run, errors=errors, session_date=session_date, session_id=session_id,
+        timestamp=timestamp, snapshot_id=snapshot_id,
+        positions_synced=positions_synced, orders_synced=orders_synced,
+    )
+
+
 def main():
-    """CLI entry point for trading agent."""
+    """CLI entry point for trading agent.
+
+    Returns an exit code for the driver modes (--emit-input: 0, or 3 when the
+    stage is skipped; --decisions-file: 1 on errors). The default API path
+    keeps its historical sys.exit(1) on errors.
+    """
     import argparse
 
     from .log_config import setup_logging
@@ -1586,12 +1752,50 @@ def main():
     parser = argparse.ArgumentParser(description="Run trading agent session")
     parser.add_argument("--dry-run", action="store_true", help="Don't execute real trades")
     parser.add_argument("--model", default=DEFAULT_EXECUTOR_MODEL, help="Claude model to use")
+    parser.add_argument("--session-id", type=int, default=None)
+    parser.add_argument("--emit-input", metavar="PATH",
+                        help="Driver mode: run steps 1-3 and write the executor input JSON to PATH")
+    parser.add_argument("--decisions-file", metavar="PATH",
+                        help="Driver mode: execute a structured decisions payload (needs --input-file)")
+    parser.add_argument("--input-file", metavar="PATH", help="The file written by --emit-input")
 
     args = parser.parse_args()
+
+    if args.emit_input and args.decisions_file:
+        parser.error("--emit-input and --decisions-file are mutually exclusive")
+
+    if args.emit_input:
+        prepared = prepare_executor_stage(
+            dry_run=args.dry_run, session_id=args.session_id, session_date=None,
+        )
+        with open(args.emit_input, "w") as fh:
+            json.dump(prepared, fh, default=str)
+        if prepared.get("skipped"):
+            logger.warning("Executor stage skipped: %s", prepared["skipped"])
+            return 3
+        return 0
+
+    if args.decisions_file:
+        if not args.input_file:
+            parser.error("--decisions-file requires --input-file")
+        with open(args.decisions_file) as fh:
+            decisions = json.load(fh)
+        with open(args.input_file) as fh:
+            prepared = json.load(fh)
+        result = execute_decisions_payload(
+            decisions, prepared, dry_run=args.dry_run, session_id=args.session_id,
+        )
+        if result.errors:
+            logger.error("Errors encountered:")
+            for error in result.errors:
+                logger.error("  - %s", error)
+            return 1
+        return 0
 
     result = run_trading_session(
         dry_run=args.dry_run,
         model=args.model,
+        session_id=args.session_id,
     )
 
     if result.errors:
@@ -1599,7 +1803,8 @@ def main():
         for error in result.errors:
             logger.error("  - %s", error)
         sys.exit(1)
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    sys.exit(main())

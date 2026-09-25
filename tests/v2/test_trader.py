@@ -3003,3 +3003,123 @@ class TestPostFillRefreshFailClosed:
             result = run_trading_session(dry_run=True)
         assert mocks["execute_market_order"].call_count == 2
         assert not [e for e in result.errors if "account refresh failed" in e]
+
+
+# ---------------------------------------------------------------------------
+# Executor seam: prepare_executor_stage / execute_decisions_payload / CLI
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from v2 import trader  # noqa: E402
+
+
+def _prepared():
+    return {
+        "skipped": None,
+        "executor_input": {
+            "playbook_actions": [], "positions": [], "account": {"portfolio_value": 1000.0},
+            "attribution_summary": {}, "recent_outcomes": [], "market_outlook": "", "risk_notes": "",
+            "current_prices": {}, "strategy_identity": "", "strategy_rules": [], "equity_summary": {},
+            "todays_decisions": [], "recent_ticker_decisions": [], "playbook_action_history": [],
+        },
+        "account_info": {"portfolio_value": 1000.0, "equity": 1000.0, "last_equity": 1000.0, "buying_power": 500.0},
+        "snapshot_id": 1, "positions_synced": 0, "orders_synced": 0,
+        "session_date": "2026-09-22", "errors": [],
+    }
+
+
+def test_prepare_executor_stage_market_closed_is_skip():
+    with patch("v2.trader._sync_from_alpaca", return_value=(0, 0)), \
+         patch("v2.trader.is_market_open", return_value=False):
+        out = trader.prepare_executor_stage(dry_run=False, session_id=1, session_date=date(2026, 9, 22))
+    assert out["skipped"] == "market_closed"
+
+
+def test_prepare_executor_stage_breaker_reports_error_and_skips():
+    with patch("v2.trader._sync_from_alpaca", return_value=(0, 0)), \
+         patch("v2.trader.is_market_open", return_value=True), \
+         patch("v2.trader._build_stock_data_client"), \
+         patch("v2.trader._snapshot_account", return_value=({"equity": 900.0, "last_equity": 1000.0}, 1)), \
+         patch("v2.trader.check_daily_loss_limit", return_value="down 10%"), \
+         patch("v2.trader.record_event"):
+        out = trader.prepare_executor_stage(dry_run=False, session_id=1, session_date=date(2026, 9, 22))
+    assert out["skipped"] == "daily_loss_limit" and out["errors"] == ["down 10%"]
+
+
+def test_prepare_executor_stage_emits_input():
+    ctx = MagicMock()
+    with patch("v2.trader._sync_from_alpaca", return_value=(2, 1)), \
+         patch("v2.trader.is_market_open", return_value=True), \
+         patch("v2.trader._build_stock_data_client"), \
+         patch("v2.trader._snapshot_account", return_value=({"equity": 1000.0, "last_equity": 1000.0}, 4)), \
+         patch("v2.trader.check_daily_loss_limit", return_value=None), \
+         patch("v2.trader._build_executor_context", return_value=ctx), \
+         patch("v2.trader.executor_input_to_dict", return_value={"positions": []}):
+        out = trader.prepare_executor_stage(dry_run=False, session_id=1, session_date=date(2026, 9, 22))
+    assert out["skipped"] is None and out["snapshot_id"] == 4 and out["positions_synced"] == 2
+    assert out["executor_input"] == {"positions": []}
+
+
+def test_execute_decisions_payload_runs_money_path_in_order():
+    calls = []
+    resp = AgentResponse(decisions=[], thesis_invalidations=[], market_summary="m", risk_assessment="r")
+    with patch("v2.trader.parse_executor_response", return_value=resp), \
+         patch("v2.trader.check_daily_loss_limit", return_value=None), \
+         patch("v2.trader.get_account_info", return_value={"equity": 1.0, "last_equity": 1.0}), \
+         patch("v2.trader._validate_llm_ids", side_effect=lambda *a, **k: calls.append("validate")), \
+         patch("v2.trader.get_positions", return_value=[]), \
+         patch("v2.trader._build_stock_data_client"), \
+         patch("v2.trader._execute_decisions", side_effect=lambda *a, **k: (calls.append("execute"), (MagicMock(), [], [], {}))[1]), \
+         patch("v2.trader._handle_thesis_invalidations", side_effect=lambda *a, **k: calls.append("invalidate")), \
+         patch("v2.trader._log_decisions", side_effect=lambda *a, **k: (calls.append("log"), 0)[1]), \
+         patch("v2.trader._log_session_summary"), \
+         patch("v2.trader._build_final_result", return_value="final"):
+        out = trader.execute_decisions_payload({"decisions": []}, _prepared(), dry_run=True, session_id=1)
+    assert out == "final"
+    assert calls == ["validate", "execute", "invalidate", "log"]
+
+
+def test_execute_decisions_payload_rechecks_breaker_before_orders():
+    with patch("v2.trader.parse_executor_response") as parse, \
+         patch("v2.trader.get_account_info", return_value={"equity": 900.0, "last_equity": 1000.0}), \
+         patch("v2.trader.check_daily_loss_limit", return_value="down 10%"), \
+         patch("v2.trader.record_event"), \
+         patch("v2.trader._execute_decisions") as execute:
+        out = trader.execute_decisions_payload({"decisions": []}, _prepared(), dry_run=False, session_id=1)
+    assert "down 10%" in out.errors
+    parse.assert_not_called()
+    execute.assert_not_called()
+
+
+def test_execute_decisions_payload_schema_failure_is_error_not_exception():
+    with patch("v2.trader.get_account_info", return_value={"equity": 1.0, "last_equity": 1.0}), \
+         patch("v2.trader.check_daily_loss_limit", return_value=None), \
+         patch("v2.trader.parse_executor_response", side_effect=ValueError("bad")), \
+         patch("v2.trader._execute_decisions") as execute:
+        out = trader.execute_decisions_payload({"decisions": "nope"}, _prepared(), dry_run=True, session_id=1)
+    assert any("LLM decision failed" in e for e in out.errors)
+    execute.assert_not_called()
+
+
+def test_cli_emit_input_writes_file_and_exit_codes(tmp_path):
+    out = tmp_path / "input.json"
+    with patch("v2.trader.prepare_executor_stage", return_value={"skipped": None, "x": 1}), \
+         patch("sys.argv", ["trader", "--emit-input", str(out)]), \
+         patch("v2.log_config.setup_logging"):
+        assert trader.main() == 0
+    assert json.loads(out.read_text()) == {"skipped": None, "x": 1}
+    with patch("v2.trader.prepare_executor_stage", return_value={"skipped": "market_closed"}), \
+         patch("sys.argv", ["trader", "--emit-input", str(out)]), \
+         patch("v2.log_config.setup_logging"):
+        assert trader.main() == 3
+
+
+def test_cli_decisions_file_exit_one_on_errors(tmp_path):
+    d = tmp_path / "d.json"; d.write_text('{"decisions": []}')  # noqa: E702
+    i = tmp_path / "i.json"; i.write_text(json.dumps(_prepared()))  # noqa: E702
+    result = MagicMock(errors=["LLM decision failed: x"])
+    with patch("v2.trader.execute_decisions_payload", return_value=result), \
+         patch("sys.argv", ["trader", "--decisions-file", str(d), "--input-file", str(i), "--dry-run"]), \
+         patch("v2.log_config.setup_logging"):
+        assert trader.main() == 1

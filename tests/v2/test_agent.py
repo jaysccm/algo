@@ -791,3 +791,80 @@ class TestExecutorMaxTokensEnvOverride:
              patch("v2.agent._call_with_retry", side_effect=fake_call):
             agent_module.get_trading_decisions(executor_input)
         assert captured["max_tokens"] == 9999
+
+
+# ---------------------------------------------------------------------------
+# Executor seam: executor_input_to_dict / from_dict / output schema / parse
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from v2 import agent  # noqa: E402
+
+
+def _executor_input():
+    return ExecutorInput(
+        playbook_actions=[PlaybookAction(**{
+            k: v for k, v in dict(
+                id=7, ticker="AAPL", action="buy", intent_type="invest_dollar",
+                intent_magnitude=Decimal("500"), thesis_id=3, reasoning="r",
+                confidence="high", priority=1, status="pending",
+            ).items() if k in PlaybookAction.__dataclass_fields__
+        })],
+        positions=[{"ticker": "AAPL", "shares": 10}],
+        account={"portfolio_value": 10000.0, "buying_power": 5000.0},
+        attribution_summary={"news_signal:earnings": 0.6},
+        recent_outcomes=[],
+        market_outlook="calm",
+        risk_notes="",
+        current_prices={"AAPL": Decimal("190.25")},
+    )
+
+
+def test_executor_input_round_trips_through_dict():
+    ei = _executor_input()
+    data = agent.executor_input_to_dict(ei)
+    json.dumps(data, default=str)  # must be JSON-serialisable with the same default the API path uses
+    back = agent.executor_input_from_dict(json.loads(json.dumps(data, default=str)))
+    assert back.playbook_actions[0].ticker == "AAPL"
+    assert back.current_prices["AAPL"] == Decimal("190.25")
+    assert back.account == ei.account
+
+
+def test_executor_output_schema_pins_enums():
+    schema = agent.executor_output_schema()
+    dec = schema["properties"]["decisions"]["items"]["properties"]
+    assert set(dec["action"]["enum"]) == agent.VALID_ACTIONS
+    assert set(dec["confidence"]["enum"]) == agent.VALID_CONFIDENCES
+    # null is allowed: executor.md tells the model to set intent_type null for holds.
+    assert set(dec["intent_type"]["enum"]) == agent.VALID_BUY_INTENTS | agent.VALID_SELL_INTENTS | {None}
+    assert set(schema["required"]) == {"decisions", "thesis_invalidations", "market_summary", "risk_assessment"}
+    assert set(dec.keys()) == agent.EXECUTOR_KNOWN_DECISION_KEYS - {"quantity"}
+
+
+def test_parse_executor_response_builds_agent_response():
+    data = {
+        "decisions": [{
+            "playbook_action_id": 7, "ticker": " aapl ", "action": "buy",
+            "intent_type": "invest_dollar", "intent_magnitude": 500,
+            "reasoning": "r", "confidence": "high", "is_off_playbook": False,
+            "signal_refs": [], "thesis_id": "3",
+        }],
+        "thesis_invalidations": [{"thesis_id": 9, "reason": "x"}, {"thesis_id": "bad", "reason": "y"}],
+        "market_summary": "m", "risk_assessment": "r",
+    }
+    with patch("v2.agent.record_event") as ev:
+        resp = agent.parse_executor_response(data, raw_text=json.dumps(data), stop_reason="end_turn", session_id=5)
+    assert resp.decisions[0].ticker == "AAPL"
+    assert resp.decisions[0].intent_magnitude == Decimal("500")
+    assert resp.decisions[0].thesis_id == 3
+    assert [t.thesis_id for t in resp.thesis_invalidations] == [9]
+    payload = ev.call_args.kwargs["payload"]
+    assert payload["parse_succeeded"] is True and payload["decision_count"] == 1
+
+
+def test_parse_executor_response_schema_failure_raises_and_records():
+    data = {"decisions": [{"ticker": "AAPL", "action": "short", "confidence": "high"}]}
+    with patch("v2.agent.record_event") as ev, pytest.raises(ValueError, match="schema validation"):
+        agent.parse_executor_response(data, raw_text="{}", stop_reason="end_turn", session_id=5)
+    assert ev.call_args.kwargs["payload"]["parse_succeeded"] is False

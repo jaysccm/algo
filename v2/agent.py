@@ -136,6 +136,49 @@ class ExecutorInput:
             self.playbook_action_history = []
 
 
+def executor_input_to_dict(executor_input: ExecutorInput) -> dict:
+    """The exact payload the executor prompt receives (json.dumps with default=str)."""
+    return {
+        "playbook_actions": [asdict(a) for a in executor_input.playbook_actions],
+        "positions": executor_input.positions,
+        "account": executor_input.account,
+        "attribution_summary": executor_input.attribution_summary,
+        "recent_outcomes": executor_input.recent_outcomes,
+        "market_outlook": executor_input.market_outlook,
+        "risk_notes": executor_input.risk_notes,
+        "current_prices": {k: str(v) for k, v in executor_input.current_prices.items()},
+        "strategy_identity": executor_input.strategy_identity,
+        "strategy_rules": executor_input.strategy_rules,
+        "equity_summary": executor_input.equity_summary,
+        "todays_decisions": executor_input.todays_decisions,
+        "recent_ticker_decisions": executor_input.recent_ticker_decisions,
+        "playbook_action_history": executor_input.playbook_action_history,
+    }
+
+
+def executor_input_from_dict(data: dict) -> ExecutorInput:
+    """Inverse of executor_input_to_dict, for the --decisions-file path.
+
+    playbook_actions are rebuilt as PlaybookAction (intent_magnitude back to
+    Decimal) and current_prices values as Decimal; everything else is carried
+    through as the JSON-decoded values.
+    """
+    fields = set(ExecutorInput.__dataclass_fields__)
+    kwargs = {k: v for k, v in data.items() if k in fields}
+    action_fields = set(PlaybookAction.__dataclass_fields__)
+    actions = []
+    for a in data.get("playbook_actions") or []:
+        a_kwargs = {k: v for k, v in a.items() if k in action_fields}
+        if a_kwargs.get("intent_magnitude") is not None:
+            a_kwargs["intent_magnitude"] = Decimal(str(a_kwargs["intent_magnitude"]))
+        actions.append(PlaybookAction(**a_kwargs))
+    kwargs["playbook_actions"] = actions
+    kwargs["current_prices"] = {
+        k: Decimal(str(v)) for k, v in (data.get("current_prices") or {}).items()
+    }
+    return ExecutorInput(**kwargs)
+
+
 @dataclass
 class ExecutorDecision:
     """A trading decision from the executor.
@@ -177,6 +220,58 @@ class AgentResponse:
     risk_assessment: str
 
 
+def executor_output_schema() -> dict:
+    """JSON Schema for the executor's structured output (claude -p --json-schema).
+
+    Built from the same constants the parser validates against, so a new
+    intent or confidence value changes both in one place.
+    """
+    signal_ref = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["news_signal", "macro_signal", "thesis"]},
+            "id": {"type": "integer"},
+        },
+        "required": ["type", "id"],
+    }
+    decision = {
+        "type": "object",
+        "properties": {
+            "playbook_action_id": {"type": ["integer", "null"]},
+            "ticker": {"type": "string"},
+            "action": {"type": "string", "enum": sorted(VALID_ACTIONS)},
+            "intent_type": {
+                "type": ["string", "null"],
+                "enum": sorted(VALID_BUY_INTENTS | VALID_SELL_INTENTS) + [None],
+            },
+            "intent_magnitude": {"type": ["number", "null"]},
+            "reasoning": {"type": "string"},
+            "confidence": {"type": "string", "enum": sorted(VALID_CONFIDENCES)},
+            "is_off_playbook": {"type": "boolean"},
+            "signal_refs": {"type": "array", "items": signal_ref},
+            "thesis_id": {"type": ["integer", "null"]},
+        },
+        "required": ["ticker", "action", "reasoning", "confidence", "is_off_playbook", "signal_refs"],
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "decisions": {"type": "array", "items": decision},
+            "thesis_invalidations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"thesis_id": {"type": "integer"}, "reason": {"type": "string"}},
+                    "required": ["thesis_id", "reason"],
+                },
+            },
+            "market_summary": {"type": "string"},
+            "risk_assessment": {"type": "string"},
+        },
+        "required": ["decisions", "thesis_invalidations", "market_summary", "risk_assessment"],
+    }
+
+
 TRADING_SYSTEM_PROMPT = load_prompt("executor")
 
 
@@ -198,22 +293,7 @@ def get_trading_decisions(
     client = get_claude_client()
 
     # Serialize ExecutorInput as JSON
-    input_data = {
-        "playbook_actions": [asdict(a) for a in executor_input.playbook_actions],
-        "positions": executor_input.positions,
-        "account": executor_input.account,
-        "attribution_summary": executor_input.attribution_summary,
-        "recent_outcomes": executor_input.recent_outcomes,
-        "market_outlook": executor_input.market_outlook,
-        "risk_notes": executor_input.risk_notes,
-        "current_prices": {k: str(v) for k, v in executor_input.current_prices.items()},
-        "strategy_identity": executor_input.strategy_identity,
-        "strategy_rules": executor_input.strategy_rules,
-        "equity_summary": executor_input.equity_summary,
-        "todays_decisions": executor_input.todays_decisions,
-        "recent_ticker_decisions": executor_input.recent_ticker_decisions,
-        "playbook_action_history": executor_input.playbook_action_history,
-    }
+    input_data = executor_input_to_dict(executor_input)
     input_json = json.dumps(input_data, default=str)
 
     response = _call_with_retry(
@@ -297,6 +377,20 @@ def get_trading_decisions(
         )
         raise ValueError(f"Failed to parse LLM response as JSON: {response_text}") from e
 
+    return parse_executor_response(
+        data, raw_text=response_text, stop_reason=response.stop_reason, session_id=session_id,
+    )
+
+
+def parse_executor_response(
+    data: dict, *, raw_text: str, stop_reason: str | None, session_id: int | None,
+) -> AgentResponse:
+    """Validate a decoded executor payload and build the AgentResponse.
+
+    Shared by the API path (get_trading_decisions) and the Claude Code driver
+    path (trader.py --decisions-file). Emits the executor_response event on
+    both success and schema failure; raises ValueError on failure.
+    """
     # Build response object
     decisions = []
     try:
@@ -332,12 +426,12 @@ def get_trading_decisions(
             event_type="executor_response",
             payload={
                 "parse_succeeded": False,
-                "stop_reason": response.stop_reason,
+                "stop_reason": stop_reason,
                 "decision_count": 0,
                 "thesis_invalidation_count": 0,
                 "unknown_top_level_keys": [],
                 "unknown_decision_keys": [],
-                "raw_response_text_truncated": response_text[:EXECUTOR_RAW_TEXT_CAP],
+                "raw_response_text_truncated": raw_text[:EXECUTOR_RAW_TEXT_CAP],
                 "error": f"SchemaValidationError: {e}",
             },
         )
@@ -367,12 +461,12 @@ def get_trading_decisions(
         event_type="executor_response",
         payload={
             "parse_succeeded": True,
-            "stop_reason": response.stop_reason,
+            "stop_reason": stop_reason,
             "decision_count": len(decisions),
             "thesis_invalidation_count": len(thesis_invalidations),
             "unknown_top_level_keys": unknown_top,
             "unknown_decision_keys": unknown_dec,
-            "raw_response_text_truncated": response_text[:EXECUTOR_RAW_TEXT_CAP],
+            "raw_response_text_truncated": raw_text[:EXECUTOR_RAW_TEXT_CAP],
             "error": None,
         },
     )

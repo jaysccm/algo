@@ -559,6 +559,135 @@ class TestSessionIdempotency:
         mock_insert.assert_called_once()
 
 
+    def test_resume_reopens_existing_row_and_returns_completed_stages(self):
+        from v2.session import _check_and_record_session
+        with patch("v2.session.insert_session_record") as mock_insert, \
+             patch("v2.session.get_session_for_date", return_value={"id": 7, "status": "failed"}), \
+             patch("v2.session.get_completed_stages", return_value={"learning", "pipeline"}), \
+             patch("v2.session.reopen_session") as mock_reopen:
+            session_id, completed, err = _check_and_record_session(force=False, session_date=date(2026, 9, 22), resume=True)
+        assert session_id == 7
+        assert completed == {"learning", "pipeline"}
+        assert err is None
+        mock_reopen.assert_called_once_with(7)
+        mock_insert.assert_not_called()
+
+    def test_resume_without_prior_row_starts_a_normal_session(self):
+        from v2.session import _check_and_record_session
+        with patch("v2.session.insert_session_record", return_value=12) as mock_insert, \
+             patch("v2.session.get_session_for_date", return_value=None), \
+             patch("v2.session.reopen_session") as mock_reopen:
+            session_id, completed, err = _check_and_record_session(force=False, session_date=date(2026, 9, 22), resume=True)
+        assert session_id == 12 and completed == set() and err is None
+        mock_insert.assert_called_once()
+        mock_reopen.assert_not_called()
+
+    def test_resume_wins_over_force(self):
+        from v2.session import _check_and_record_session
+        with patch("v2.session.insert_session_record") as mock_insert, \
+             patch("v2.session.get_session_for_date", return_value={"id": 7, "status": "completed"}), \
+             patch("v2.session.get_completed_stages", return_value=set()), \
+             patch("v2.session.reopen_session"):
+            session_id, _, _ = _check_and_record_session(force=True, session_date=date(2026, 9, 22), resume=True)
+        assert session_id == 7
+        mock_insert.assert_not_called()
+
+    def test_resume_skips_completed_stages_and_runs_the_rest(self):
+        """A resumed session must not rerun learning/supervisor/pipeline/strategist
+        that a prior run completed, but must run the executor and later stages."""
+        with patch("v2.session.get_session_for_date", return_value={"id": 7, "status": "running"}), \
+             patch("v2.session.get_completed_stages", return_value={"learning", "supervisor", "pipeline", "strategist"}), \
+             patch("v2.session.reopen_session"), \
+             patch("v2.session.get_stage_errors", return_value={}), \
+             patch("v2.session.complete_session") as mock_complete, \
+             patch("v2.session.run_backfill") as mock_backfill, \
+             patch("v2.session.build_attribution_constraints", return_value=""), \
+             patch("v2.session.run_supervisor") as mock_supervisor, \
+             patch("v2.session.run_pipeline") as mock_pipeline, \
+             patch("v2.session.run_strategist_loop") as mock_strategist, \
+             patch("v2.session.run_trading_session") as mock_trader, \
+             patch("v2.session.run_strategy_reflection") as mock_reflection, \
+             patch("v2.session.run_dashboard_stage"):
+            result = run_session(dry_run=False, resume=True)
+        assert result.idempotent_skip is None
+        mock_backfill.assert_not_called()
+        mock_supervisor.assert_not_called()
+        mock_pipeline.assert_not_called()
+        mock_strategist.assert_not_called()
+        mock_trader.assert_called_once()
+        mock_reflection.assert_called_once()
+        mock_complete.assert_called_once_with(7)
+
+    def test_finalize_fails_session_when_a_prior_run_left_a_failed_stage(self):
+        """The strategist failed in an earlier run of this session (e.g. the
+        pilot driver's stage-end); this run saw no error itself. The session
+        row must still end up failed, and the exit code must be 1."""
+        with patch("v2.session.get_session_for_date", return_value={"id": 7, "status": "running"}), \
+             patch("v2.session.get_completed_stages", return_value={"learning", "supervisor", "pipeline"}), \
+             patch("v2.session.reopen_session"), \
+             patch("v2.session.get_stage_errors", return_value={"strategist": "[validator] no playbook"}), \
+             patch("v2.session.fail_session") as mock_fail, \
+             patch("v2.session.complete_session") as mock_complete, \
+             patch("v2.session.build_attribution_constraints", return_value=""), \
+             patch("v2.session.run_strategist_loop"), \
+             patch("v2.session.run_trading_session"), \
+             patch("v2.session.run_strategy_reflection"), \
+             patch("v2.session.run_dashboard_stage"):
+            result = run_session(dry_run=False, resume=True, skip_ideation=True)
+        assert result.prior_stage_errors == {"strategist": "[validator] no playbook"}
+        assert result.has_errors is True  # so main() exits 1
+        mock_complete.assert_not_called()
+        mock_fail.assert_called_once()
+        assert "strategist: [validator] no playbook" in mock_fail.call_args[0][1]
+
+    def test_finalize_ignores_failed_stage_that_a_later_row_completed(self):
+        """A stage that failed in run 1 and completed in run 2 has two rows;
+        only the latest outcome counts."""
+        with patch("v2.session.get_session_for_date", return_value={"id": 7, "status": "running"}), \
+             patch("v2.session.get_completed_stages", return_value={"strategist"}), \
+             patch("v2.session.reopen_session"), \
+             patch("v2.session.get_stage_errors", return_value={"strategist": "first attempt"}), \
+             patch("v2.session.fail_session") as mock_fail, \
+             patch("v2.session.complete_session") as mock_complete, \
+             patch("v2.session.run_backfill"), \
+             patch("v2.session.build_attribution_constraints", return_value=""), \
+             patch("v2.session.run_supervisor"), \
+             patch("v2.session.run_pipeline"), \
+             patch("v2.session.run_trading_session"), \
+             patch("v2.session.run_strategy_reflection"), \
+             patch("v2.session.run_dashboard_stage"):
+            run_session(dry_run=False, resume=True)
+        mock_fail.assert_not_called()
+        mock_complete.assert_called_once_with(7)
+
+    def test_finalize_reports_in_process_stage_failure_once(self):
+        """A stage that failed in THIS process has both an error field and a
+        failed stage row; the session error names it once, and it is not
+        misreported as a prior-run failure."""
+        with patch("v2.session.insert_session_record", return_value=5), \
+             patch("v2.session.get_stage_errors", return_value={"pipeline": "boom"}), \
+             patch("v2.session.fail_session") as mock_fail, \
+             patch("v2.session.run_backfill"), \
+             patch("v2.session.build_attribution_constraints", return_value=""), \
+             patch("v2.session.run_pipeline", side_effect=RuntimeError("boom")):
+            result = run_session(dry_run=False)
+        assert result.pipeline_error == "boom"
+        assert result.prior_stage_errors == {}
+        mock_fail.assert_called_once_with(5, "boom")
+
+    def test_main_accepts_resume_flag(self):
+        import sys
+
+        from v2.session import main
+        with patch.object(sys, "argv", ["session", "--resume", "--skip-dashboard"]), \
+             patch("v2.session.setup_logging"), \
+             patch("v2.session.run_session") as mock_run:
+            mock_run.return_value.idempotent_skip = None
+            mock_run.return_value.has_errors = False
+            main()
+        assert mock_run.call_args.kwargs["resume"] is True
+
+
 class TestPerStageResume:
     def test_no_resume_all_stages_run_after_prior_failure(self):
         """Per-run sessions: a forced re-run after a failed prior session does

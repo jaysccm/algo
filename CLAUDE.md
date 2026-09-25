@@ -83,6 +83,7 @@ The session orchestrator runs stages sequentially. Each stage is independent —
 A session is idempotent per market date: if ANY session row already exists
 for the date (completed, failed, or running), a re-run is a no-op unless
 `--force` is passed. Deliberate retries after a failure need `--force`.
+`--resume` reopens the day's latest session row and skips its completed stages; `--force` starts a fresh row and reruns everything.
 
 The dashboard renders permalinks at `/mistakes/` and `/attribution/`
 (surfacing closed losers + retired rules, and best/worst signal types
@@ -180,6 +181,10 @@ task session:dry-run INSTANCE=paper   # also skips ideation/strategy/dashboard
 
 # Re-run a session for a date that already has a session row (any status)
 task session INSTANCE=paper -- --force
+
+# Continue today's session where it stopped: reopens the existing row and
+# skips stages it already completed (a --force run would redo everything)
+task session INSTANCE=paper -- --resume
 
 # Run learning loop standalone
 task learn INSTANCE=paper

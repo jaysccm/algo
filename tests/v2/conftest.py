@@ -58,6 +58,9 @@ _SESSION_DB_PATCH_TARGETS = (
     "v2.session.close_orphan_running_stages",
     "v2.session.complete_session",
     "v2.session.fail_session",
+    "v2.session.get_completed_stages",
+    "v2.session.get_stage_errors",
+    "v2.session.reopen_session",
 )
 
 
@@ -78,6 +81,8 @@ def _block_social_llm_and_session_db_calls(monkeypatch):
         session_module.get_session_for_date.return_value = None
         session_module.insert_session_record.return_value = None
         session_module.close_orphan_running_stages.return_value = []
+        session_module.get_completed_stages.return_value = set()
+        session_module.get_stage_errors.return_value = {}
         yield
 
 

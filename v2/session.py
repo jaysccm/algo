@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -33,13 +33,16 @@ from .database.trading_db import (
     expire_stale_playbook_actions,
     fail_session,
     fail_session_stage,
+    get_completed_stages,
     get_current_strategy_state,
     get_playbook,
     get_session_for_date,
+    get_stage_errors,
     insert_session_record,
     insert_session_stage,
     insert_strategy_memo,
     mark_session_market_closed,
+    reopen_session,
 )
 from .ideation_claude import ClaudeIdeationResult, run_strategist_loop
 from .log_config import setup_logging
@@ -63,6 +66,13 @@ _ERROR_FIELDS = (
     "learning_error", "supervisor_error", "pipeline_error", "strategist_error",
     "trading_error", "strategy_error", "dashboard_error",
 )
+
+# session_stages.stage_name -> the SessionResult field that stage's error lands in.
+_STAGE_ERROR_FIELD = {
+    "learning": "learning_error", "supervisor": "supervisor_error", "pipeline": "pipeline_error",
+    "strategist": "strategist_error", "executor": "trading_error", "strategy": "strategy_error",
+    "dashboard": "dashboard_error",
+}
 
 
 @dataclass
@@ -95,10 +105,11 @@ class SessionResult:
     skipped_strategy: bool = False
     skipped_dashboard: bool = False
     duration_seconds: float = 0.0
+    prior_stage_errors: dict = field(default_factory=dict)  # failed stage rows from an earlier run of this session
 
     @property
     def has_errors(self) -> bool:
-        return any(getattr(self, f) for f in _ERROR_FIELDS)
+        return any(getattr(self, f) for f in _ERROR_FIELDS) or bool(self.prior_stage_errors)
 
 
 def _start_stage(session_id: int | None, stage: str) -> None:
@@ -200,20 +211,42 @@ def _dashboard_publish_enabled() -> bool:
     )
 
 
-def _check_and_record_session(force: bool, session_date) -> tuple[int | None, set, str | None]:
+def _check_and_record_session(force: bool, session_date, resume: bool = False) -> tuple[int | None, set, str | None]:
     """Returns (session_id, completed_stages, early_error).
 
-    Per-run sessions: every invocation creates a new sessions row.
-    completed_stages is always the empty set — no resume across runs.
+    Per-run sessions: --force (and a plain run) create a new sessions row and
+    completed_stages is empty.
 
-    Idempotency: if force=False and ANY session already exists for this
-    date — completed, failed, or running — we skip with early_error set.
-    Failed sessions gate too: a cron double-fire after a partial failure
-    would otherwise expire the first run's pending playbook actions and
-    re-run the strategist, duplicating playbooks/theses for the date.
-    Deliberate retries use --force.
+    --resume reopens the latest row for the date instead and returns the
+    stages that row already completed, so the run skips them. This is how a
+    session split across processes (the strategist pilot's driver) or a
+    retry after a mid-run failure continues without redoing finished work.
+    With no prior row, --resume is a plain run.
+
+    Idempotency: if neither flag is set and ANY session already exists for
+    this date — completed, failed, or running — we skip with early_error
+    set. Failed sessions gate too: a cron double-fire after a partial
+    failure would otherwise expire the first run's pending playbook actions
+    and re-run the strategist, duplicating playbooks/theses for the date.
     """
-    if not force:
+    if resume:
+        try:
+            existing = get_session_for_date(session_date)
+        except Exception as e:
+            logger.warning("Could not look up session to resume: %s — starting a new one", e)
+            existing = None
+        if existing:
+            session_id = existing["id"]
+            try:
+                completed = get_completed_stages(session_id)
+                reopen_session(session_id)
+            except Exception as e:
+                logger.warning("Could not resume session %s: %s — proceeding without tracking", session_id, e)
+                return None, set(), None
+            logger.info("Resuming session %d (was %s); completed stages: %s",
+                        session_id, existing.get("status"), ", ".join(sorted(completed)) or "none")
+            return session_id, completed, None
+    elif not force:
         try:
             existing = get_session_for_date(session_date)
             if existing:
@@ -535,12 +568,27 @@ def _finalize_session(result: SessionResult, session_id: int | None) -> None:
                 logger.warning("Closed orphan running stages: %s", swept)
         except Exception as e:
             logger.warning("Could not sweep orphan stages: %s", e)
+        prior_errors: dict[str, str] = {}
         try:
-            if result.has_errors:
-                error_summary = "; ".join(
-                    str(getattr(result, f)) for f in _ERROR_FIELDS if getattr(result, f)
-                )
-                fail_session(session_id, error_summary)
+            completed = get_completed_stages(session_id)
+            # A stage whose failure this process already recorded in its own
+            # error field is reported once, via that field.
+            prior_errors = {
+                s: e for s, e in get_stage_errors(session_id).items()
+                if s not in completed and not getattr(result, _STAGE_ERROR_FIELD.get(s, ""), None)
+            }
+        except Exception as e:
+            logger.warning("Could not read stage errors: %s", e)
+        result.prior_stage_errors = prior_errors
+        try:
+            in_process = [str(getattr(result, f)) for f in _ERROR_FIELDS if getattr(result, f)]
+            # Stage rows failed by another process of this session (a --resume
+            # run after the pilot driver's stage-end, or an earlier attempt)
+            # count too; otherwise a session with a failed strategist row could
+            # end 'completed' because this process only ran the later stages.
+            from_rows = [f"{s}: {e}" for s, e in prior_errors.items()]
+            if in_process or from_rows:
+                fail_session(session_id, "; ".join(in_process + from_rows))
             else:
                 complete_session(session_id)
         except Exception as e:
@@ -559,6 +607,8 @@ def _finalize_session(result: SessionResult, session_id: int | None) -> None:
             err = getattr(result, field_name)
             if err:
                 logger.error("  %s: %s", field_name, err)
+        for stage, err in result.prior_stage_errors.items():
+            logger.error("  %s (failed stage row): %s", stage, err)
     else:
         logger.info("  All stages completed successfully")
     logger.info("=" * 60)
@@ -578,6 +628,7 @@ def run_session(
     pipeline_hours: int = 24,
     pipeline_limit: int = 300,
     force: bool = False,
+    resume: bool = False,
 ) -> SessionResult:
     start = time.monotonic()
 
@@ -634,7 +685,7 @@ def run_session(
     except Exception as e:
         logger.warning("expire_stale_playbook_actions failed (non-fatal): %s", e)
 
-    session_id, completed_stages, early_error = _check_and_record_session(force, today)
+    session_id, completed_stages, early_error = _check_and_record_session(force, today, resume=resume)
     if early_error:
         # T2.1: idempotent skip is not a failure. main() reads this field
         # and exits 0 with a "nothing to do" log line.
@@ -676,6 +727,7 @@ def main():
     parser.add_argument("--skip-dashboard", action="store_true")
     parser.add_argument("--pipeline-hours", type=int, default=24)
     parser.add_argument("--force", action="store_true", help="Override session idempotency check")
+    parser.add_argument("--resume", action="store_true", help="Reopen today's session row and skip stages it already completed")
 
     args = parser.parse_args()
     result = run_session(
@@ -687,6 +739,7 @@ def main():
         skip_dashboard=args.skip_dashboard,
         pipeline_hours=args.pipeline_hours,
         force=args.force,
+        resume=args.resume,
     )
     if result.idempotent_skip:
         # T2.1: nothing to do, not a failure. Exit 0 so cron/Taskfile

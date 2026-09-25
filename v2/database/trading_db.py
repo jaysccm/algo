@@ -929,6 +929,29 @@ def fail_session(session_id, error_text):
         """, (error_text, session_id))
 
 
+def reopen_session(session_id: int) -> None:
+    """Put a session back to running for a --resume run. The stage rows are
+    kept: get_completed_stages() decides what the resumed run skips."""
+    with get_cursor() as cur:
+        cur.execute("""
+            UPDATE sessions SET status = 'running', completed_at = NULL, error = NULL
+            WHERE id = %s
+        """, (session_id,))
+
+
+def get_stage_errors(session_id: int) -> dict[str, str]:
+    """{stage_name: error} for every failed stage row of a session, in row order.
+    A stage that failed and was later completed appears here AND in
+    get_completed_stages(); callers subtract the latter."""
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT stage_name, error FROM session_stages
+            WHERE session_id = %s AND status = 'failed'
+            ORDER BY id
+        """, (session_id,))
+        return {row["stage_name"]: row["error"] or "failed" for row in cur.fetchall()}
+
+
 def mark_session_market_closed(session_id: int) -> None:
     """Mark a session whose executor performed no trades because markets were closed."""
     with get_cursor() as cur:

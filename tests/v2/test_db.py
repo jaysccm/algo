@@ -1237,6 +1237,29 @@ class TestSessionStages:
         result = get_completed_stages(session_id=1)
         assert result == set()
 
+    def test_reopen_session_sets_running_and_clears_error(self, mock_db, mock_cursor):
+        from v2.database.trading_db import reopen_session
+        reopen_session(session_id=7)
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "UPDATE sessions" in sql and "'running'" in sql
+        assert "completed_at = NULL" in sql and "error = NULL" in sql
+        assert params == (7,)
+
+    def test_get_stage_errors_maps_failed_rows(self, mock_db, mock_cursor):
+        from v2.database.trading_db import get_stage_errors
+        mock_cursor.fetchall.return_value = [
+            {"stage_name": "strategist", "error": "no playbook"},
+            {"stage_name": "executor", "error": None},
+        ]
+        assert get_stage_errors(session_id=7) == {"strategist": "no playbook", "executor": "failed"}
+        sql = mock_cursor.execute.call_args[0][0]
+        assert "status = 'failed'" in sql
+
+    def test_get_stage_errors_empty(self, mock_db, mock_cursor):
+        from v2.database.trading_db import get_stage_errors
+        mock_cursor.fetchall.return_value = []
+        assert get_stage_errors(session_id=7) == {}
+
     def test_complete_session_stage_writes_usage_columns(self, mock_db, mock_cursor):
         """complete_session_stage should write the five token columns when
         a usage object is supplied."""

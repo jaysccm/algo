@@ -27,13 +27,30 @@ from .database.trading_db import (
 )
 from .executor import get_account_info
 from .market_data import format_market_snapshot, get_market_snapshot
-from .news_filter import curate_signals
 from .patterns import analyze_round_trips
 
 logger = logging.getLogger(__name__)
 
 
 _curated_news_cache: dict[tuple, list[int]] = {}
+
+_CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def rank_news_candidates(candidates: list[dict], target_n: int) -> list[int]:
+    """Deterministic stand-in for the retired Haiku relevance filter.
+
+    Confidence first, recency second. The strategist does its own relevance
+    judgement over the shortlist; this only keeps the tool result bounded.
+    """
+    ordered = sorted(
+        candidates,
+        key=lambda r: (
+            _CONFIDENCE_RANK.get((r.get("confidence") or "low").lower(), 3),
+            -r["published_at"].timestamp(),
+        ),
+    )
+    return [r["id"] for r in ordered[:target_n]]
 
 
 def reset_session():
@@ -341,9 +358,9 @@ def tool_get_curated_news(
     days: int = 7,
     target_n: int = 30,
 ) -> str:
-    """Curated news signals — Haiku-filtered to the ~target_n most
-    relevant for today's market regime. Use this by default for thesis
-    research; use get_news_signals if you need the raw firehose.
+    """Curated news signals — the ~target_n highest-confidence, most recent
+    for the window. Use this by default for thesis research; use
+    get_news_signals if you need the raw firehose.
 
     Each line is prefixed with [#<id>] (same format as get_news_signals)
     so signal_refs citation works unchanged.
@@ -368,19 +385,14 @@ def tool_get_curated_news(
             # No filtering needed — return everything.
             selected_ids = [r["id"] for r in candidates]
         else:
-            regime_context = get_macro_context(days=2)
-            selected_ids = curate_signals(
-                candidates,
-                target_n=target_n,
-                regime_context=regime_context,
-            )
+            selected_ids = rank_news_candidates(candidates, target_n)
         _curated_news_cache[cache_key] = selected_ids
     else:
         selected_ids = cached_ids
 
     selected_set = set(selected_ids)
     selected_rows = [r for r in candidates if r["id"] in selected_set]
-    # Preserve curate_signals' ordering (rank order), not DB order:
+    # Preserve rank_news_candidates' ordering (rank order), not DB order:
     order = {sid: i for i, sid in enumerate(selected_ids)}
     selected_rows.sort(key=lambda r: order.get(r["id"], 1_000_000))
 

@@ -1310,12 +1310,12 @@ class TestToolGetRecentPlaybooks:
 
 
 class TestToolGetCuratedNews:
-    """tool_get_curated_news fetches signals from DB, filters via Haiku,
-    re-renders in the existing [#id] line format. Falls back to firehose
-    on filter failure. Caches per (ticker, days, target_n) within a
-    session; reset by reset_session()."""
+    """tool_get_curated_news fetches signals from DB, ranks them
+    deterministically (confidence then recency), re-renders in the
+    existing [#id] line format. Caches per (ticker, days, target_n)
+    within a session; reset by reset_session()."""
 
-    def _row(self, id_, ticker="AAPL", summary="full summary"):
+    def _row(self, id_, ticker="AAPL", summary="full summary", confidence="high", published_at=None):
         from datetime import datetime
         return {
             "id": id_,
@@ -1323,23 +1323,23 @@ class TestToolGetCuratedNews:
             "headline": f"headline {id_}",
             "category": "momentum",
             "sentiment": "bullish",
-            "confidence": "high",
-            "published_at": datetime(2026, 5, 9, 12, 0, tzinfo=UTC),
+            "confidence": confidence,
+            "published_at": published_at or datetime(2026, 5, 9, 12, 0, tzinfo=UTC),
             "summary": summary,
             "alpaca_id": f"alp-{id_}",
         }
 
-    def test_filters_signals_via_haiku(self, monkeypatch):
+    def test_ranks_by_confidence_then_recency(self, monkeypatch):
         from v2 import tools
 
-        rows = [self._row(i) for i in [1, 2, 3, 4, 5]]
+        rows = [
+            self._row(1, confidence="low"),
+            self._row(2, confidence="high"),
+            self._row(3, confidence="medium"),
+            self._row(4, confidence="high"),
+            self._row(5, confidence="low"),
+        ]
         monkeypatch.setattr(tools, "get_news_signals", lambda **kw: rows)
-        monkeypatch.setattr(tools, "get_macro_context", lambda days: "risk-on regime")
-        monkeypatch.setattr(
-            tools,
-            "curate_signals",
-            lambda signals, target_n, regime_context: [2, 4],
-        )
         tools.reset_session()  # ensure cache is clean
 
         out = tools.tool_get_curated_news(target_n=2)
@@ -1349,24 +1349,24 @@ class TestToolGetCuratedNews:
         assert "[#3]" not in out
         assert "[#5]" not in out
 
-    def test_skips_haiku_when_below_target(self, monkeypatch):
+    def test_skips_ranking_when_below_target(self, monkeypatch):
         from v2 import tools
 
         rows = [self._row(i) for i in [1, 2, 3]]
         monkeypatch.setattr(tools, "get_news_signals", lambda **kw: rows)
-        monkeypatch.setattr(tools, "get_macro_context", lambda days: "x")
         called = {"count": 0}
+        real_rank = tools.rank_news_candidates
 
-        def fake_curate(*args, **kwargs):
+        def fake_rank(*args, **kwargs):
             called["count"] += 1
-            return [s["id"] for s in args[0]]
+            return real_rank(*args, **kwargs)
 
-        monkeypatch.setattr(tools, "curate_signals", fake_curate)
+        monkeypatch.setattr(tools, "rank_news_candidates", fake_rank)
         tools.reset_session()
 
         out = tools.tool_get_curated_news(target_n=10)
 
-        assert called["count"] == 0, "curate_signals should not be called when candidates <= target_n"
+        assert called["count"] == 0, "rank_news_candidates should not be called when candidates <= target_n"
         for i in [1, 2, 3]:
             assert f"[#{i}]" in out
 
@@ -1381,20 +1381,19 @@ class TestToolGetCuratedNews:
         ]
         captured = {}
 
-        def fake_curate(signals, target_n, regime_context):
-            captured["signal_ids"] = [s["id"] for s in signals]
-            return [s["id"] for s in signals]
+        def fake_rank(candidates, target_n):
+            captured["signal_ids"] = [s["id"] for s in candidates]
+            return [s["id"] for s in candidates][:target_n]
 
         monkeypatch.setattr(tools, "get_news_signals", lambda **kw: rows)
-        monkeypatch.setattr(tools, "get_macro_context", lambda days: "x")
-        monkeypatch.setattr(tools, "curate_signals", fake_curate)
+        monkeypatch.setattr(tools, "rank_news_candidates", fake_rank)
         tools.reset_session()
 
-        # Force the filter path by setting target_n below the post-NULL-filter count.
+        # Force the ranking path by setting target_n below the post-NULL-filter count.
         tools.tool_get_curated_news(target_n=1)
 
         assert captured["signal_ids"] == [1, 4], (
-            f"NULL/empty summaries must be dropped before filter; got {captured['signal_ids']}"
+            f"NULL/empty summaries must be dropped before ranking; got {captured['signal_ids']}"
         )
 
     def test_caches_within_session(self, monkeypatch):
@@ -1402,14 +1401,13 @@ class TestToolGetCuratedNews:
 
         rows = [self._row(i) for i in range(1, 41)]  # 40 rows, above target
         monkeypatch.setattr(tools, "get_news_signals", lambda **kw: rows)
-        monkeypatch.setattr(tools, "get_macro_context", lambda days: "x")
         called = {"count": 0}
 
-        def fake_curate(*args, **kwargs):
+        def fake_rank(*args, **kwargs):
             called["count"] += 1
             return [1, 2, 3]
 
-        monkeypatch.setattr(tools, "curate_signals", fake_curate)
+        monkeypatch.setattr(tools, "rank_news_candidates", fake_rank)
         tools.reset_session()
 
         tools.tool_get_curated_news(target_n=3)
@@ -1426,14 +1424,13 @@ class TestToolGetCuratedNews:
 
         rows = [self._row(i) for i in range(1, 41)]
         monkeypatch.setattr(tools, "get_news_signals", lambda **kw: rows)
-        monkeypatch.setattr(tools, "get_macro_context", lambda days: "x")
         called = {"count": 0}
 
-        def fake_curate(*args, **kwargs):
+        def fake_rank(*args, **kwargs):
             called["count"] += 1
             return [1]
 
-        monkeypatch.setattr(tools, "curate_signals", fake_curate)
+        monkeypatch.setattr(tools, "rank_news_candidates", fake_rank)
         tools.reset_session()
 
         tools.tool_get_curated_news(target_n=1)
@@ -1452,8 +1449,6 @@ class TestToolGetCuratedNews:
             return [self._row(1, ticker="AAPL")]
 
         monkeypatch.setattr(tools, "get_news_signals", fake_get_news_signals)
-        monkeypatch.setattr(tools, "get_macro_context", lambda days: "x")
-        monkeypatch.setattr(tools, "curate_signals", lambda *a, **kw: [1])
         tools.reset_session()
 
         tools.tool_get_curated_news(ticker="aapl", days=3)
@@ -1461,6 +1456,44 @@ class TestToolGetCuratedNews:
         # Ticker is normalised upstream; assert the DB was queried for AAPL/3.
         assert captured_kwargs.get("ticker") == "AAPL"
         assert captured_kwargs.get("days") == 3
+
+
+def test_rank_news_candidates_confidence_then_recency():
+    from datetime import datetime, timedelta
+
+    from v2 import tools
+
+    t0 = datetime(2026, 9, 22, 12, 0)
+    cands = [
+        {"id": 1, "confidence": "low", "published_at": t0},
+        {"id": 2, "confidence": "high", "published_at": t0 - timedelta(hours=5)},
+        {"id": 3, "confidence": "high", "published_at": t0},
+        {"id": 4, "confidence": "medium", "published_at": t0},
+    ]
+    assert tools.rank_news_candidates(cands, target_n=3) == [3, 2, 4]
+
+
+def test_curated_news_uses_rank_and_caches(mock_db):
+    from datetime import datetime
+
+    from v2 import tools
+
+    t0 = datetime(2026, 9, 22, 12, 0)
+    rows = [
+        {"id": i, "ticker": "AAPL", "category": "earnings", "sentiment": "bullish",
+         "confidence": "high" if i % 2 else "low", "published_at": t0, "headline": f"h{i}", "summary": "s"}
+        for i in range(1, 6)
+    ]
+    tools.reset_session()
+    with patch("v2.tools.get_news_signals", return_value=rows) as get:
+        first = tools.tool_get_curated_news(ticker="AAPL", days=7, target_n=2)
+        second = tools.tool_get_curated_news(ticker="AAPL", days=7, target_n=2)
+    assert first == second
+    # Ids 1, 3, 5 are "high" confidence and tie on published_at; the stable
+    # sort in rank_news_candidates preserves their input order, so the
+    # top-2 shortlist is [1, 3].
+    assert first.splitlines()[0].startswith("[#1]") and len(first.splitlines()) == 2
+    assert get.call_count == 2  # rows re-read, ranking cached
 
 
 def test_get_retired_rules_returns_recent_retirements(mock_db, mock_cursor):

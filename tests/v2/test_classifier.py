@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from v2 import classifier
 from v2.classifier import (
     CLASSIFICATION_MODEL,
     ClassificationResult,
@@ -1120,3 +1121,31 @@ class TestClassifierTelemetryWiring:
         assert captured["session_id"] == 42
         assert captured["stage_name"] == "pipeline"
         assert captured["purpose"] == "classifier_relevance"
+
+
+def test_build_batch_user_message_numbers_and_sanitizes():
+    msg = classifier.build_batch_user_message(["Apple\x00 beats", "Fed holds"])
+    assert msg.splitlines() == ['1. "Apple beats"', '2. "Fed holds"']
+
+
+def test_parse_batch_entries_index_remap_and_noise_default():
+    now = datetime(2026, 9, 22, 12, 0)
+    entries = [
+        {"index": 2, "type": "ticker_specific", "tickers": ["AAPL"], "category": "earnings",
+         "sentiment": "bullish", "confidence": "high"},
+        {"index": 99, "type": "ticker_specific", "tickers": ["X"], "category": "earnings"},
+        "garbage",
+    ]
+    with patch("v2.classifier._validate_ticker", side_effect=lambda t: t):
+        out = classifier.parse_batch_entries(entries, ["h1", "h2"], [now, now], [None, "a2"], ["", "s2"])
+    assert out[0].news_type == "noise"
+    assert out[1].ticker_signals[0].ticker == "AAPL"
+    assert out[1].ticker_signals[0].alpaca_id == "a2" and out[1].ticker_signals[0].summary == "s2"
+
+
+def test_classification_output_schema_shape():
+    schema = classifier.classification_output_schema()
+    assert schema["required"] == ["classifications"]
+    item = schema["properties"]["classifications"]["items"]
+    assert item["required"] == ["index", "type"]
+    assert set(item["properties"]["type"]["enum"]) == {"ticker_specific", "macro_political", "sector", "noise"}

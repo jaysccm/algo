@@ -1,9 +1,12 @@
 """Tests for v2/pipeline.py — news pipeline orchestrator."""
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+from v2 import pipeline
 from v2.classifier import ClassificationResult, MacroSignal, TickerSignal
+from v2.news import NewsItem
 from v2.pipeline import PipelineStats, run_pipeline
 
 SAMPLE_PUBLISHED_AT = datetime(2025, 6, 15, 10, 0, 0)
@@ -275,3 +278,72 @@ class TestPipelineSummaryPersistence:
         assert ticker_tuples[0][-1] == "Apple closed at $300 after the Foxconn deal.", (
             f"summary not at last position; tuple was {ticker_tuples[0]}"
         )
+
+
+def _item(i):
+    return NewsItem(id=f"id{i}", headline=f"Headline {i}", summary=f"s{i}", author="", source="",
+                    symbols=[], published_at=datetime(2026, 9, 22, 12, i), url="")
+
+
+def test_emit_batches_writes_files_of_batch_size(tmp_path):
+    with patch("v2.pipeline.fetch_broad_news", return_value=[_item(i) for i in range(3)]):
+        n = pipeline.emit_batches(str(tmp_path), hours=24, limit=300, batch_size=2)
+    assert n == 2
+    b0 = json.loads((tmp_path / "batch-00.json").read_text())
+    assert [it["index"] for it in b0["items"]] == [1, 2]
+    assert b0["items"][0]["alpaca_id"] == "id0" and b0["items"][0]["summary"] == "s0"
+    assert b0["user_message"].startswith('1. "Headline 0"')
+    b1 = json.loads((tmp_path / "batch-01.json").read_text())
+    assert len(b1["items"]) == 1
+
+
+def test_emit_batches_no_news_writes_nothing(tmp_path):
+    with patch("v2.pipeline.fetch_broad_news", return_value=[]):
+        assert pipeline.emit_batches(str(tmp_path), hours=24, limit=300) == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def _write_batch(tmp_path, name, items, result=None):
+    (tmp_path / f"{name}.json").write_text(json.dumps({"items": items, "user_message": ""}))
+    if result is not None:
+        (tmp_path / f"{name}.result.json").write_text(json.dumps(result))
+
+
+def test_ingest_batches_stores_signals_and_marks_missing_results_noise(tmp_path):
+    items = [{"index": 1, "headline": "h", "published_at": "2026-09-22T12:00:00", "alpaca_id": "a", "summary": "s"}]
+    good = {"is_error": False, "structured_output": {"classifications": [
+        {"index": 1, "type": "ticker_specific", "tickers": ["AAPL"], "category": "earnings",
+         "sentiment": "bullish", "confidence": "high"}]}}
+    _write_batch(tmp_path, "batch-00", items, good)
+    _write_batch(tmp_path, "batch-01", items)  # no result file
+    with patch("v2.classifier._validate_ticker", side_effect=lambda t: t), \
+         patch("v2.pipeline.insert_news_signals_batch", return_value=1) as ins, \
+         patch("v2.pipeline.insert_macro_signals_batch", return_value=0):
+        stats = pipeline.ingest_batches(str(tmp_path), session_id=1, dry_run=False)
+    assert stats.news_fetched == 2 and stats.ticker_signals_stored == 1 and stats.noise_dropped == 1
+    assert ins.call_args.args[0][0][0] == "AAPL"
+
+
+def test_ingest_batches_error_result_is_noise(tmp_path):
+    items = [{"index": 1, "headline": "h", "published_at": "2026-09-22T12:00:00", "alpaca_id": None, "summary": ""}]
+    _write_batch(tmp_path, "batch-00", items, {"is_error": True, "result": "rate limited"})
+    with patch("v2.pipeline.insert_news_signals_batch", return_value=0), \
+         patch("v2.pipeline.insert_macro_signals_batch", return_value=0):
+        stats = pipeline.ingest_batches(str(tmp_path), session_id=1, dry_run=False)
+    assert stats.noise_dropped == 1 and stats.errors == 0
+
+
+def test_cli_flags(tmp_path):
+    # setup_logging() is patched at its source (v2.log_config) — main()
+    # imports it locally at call time, and the sandboxed test runner has no
+    # write access to create a "logs" dir in the cwd.
+    with patch("v2.log_config.setup_logging"), \
+         patch("v2.pipeline.emit_batches", return_value=2) as emit, \
+         patch("sys.argv", ["pipeline", "--emit-batches", str(tmp_path), "--hours", "6", "--limit", "10"]):
+        assert pipeline.main() == 0
+    emit.assert_called_once_with(str(tmp_path), hours=6, limit=10)
+    stats = pipeline.PipelineStats(1, 0, 0, 0, errors=1)
+    with patch("v2.log_config.setup_logging"), \
+         patch("v2.pipeline.ingest_batches", return_value=stats), \
+         patch("sys.argv", ["pipeline", "--ingest", str(tmp_path), "--session-id", "4"]):
+        assert pipeline.main() == 1

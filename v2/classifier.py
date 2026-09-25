@@ -335,6 +335,67 @@ def classify_news_batch(
     return results
 
 
+def build_batch_user_message(headlines: list[str]) -> str:
+    """The numbered headline block the batch classifier prompt expects."""
+    return "\n".join(f'{i + 1}. "{_sanitize_headline(h)}"' for i, h in enumerate(headlines))
+
+
+def parse_batch_entries(
+    entries: list,
+    headlines: list[str],
+    published_ats: list[datetime],
+    alpaca_ids: list[str | None],
+    summaries: list[str],
+) -> list[ClassificationResult]:
+    """Map classifier entries back onto headlines by 1-based `index`.
+
+    P2.15: index-based, not positional — the model may reorder or truncate.
+    A headline with no entry is noise. Shared by the API path and the
+    file-based ingest path (pipeline.py --ingest).
+    """
+    by_idx: dict[int, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("index")
+        if isinstance(idx, int) and 1 <= idx <= len(headlines):
+            by_idx[idx - 1] = entry
+    results = []
+    for i in range(len(headlines)):
+        entry = by_idx.get(i)
+        if entry is None:
+            results.append(ClassificationResult(news_type="noise", ticker_signals=[], macro_signal=None))
+        else:
+            results.append(_build_classification_result(entry, headlines[i], published_ats[i], alpaca_ids[i], summaries[i]))
+    return results
+
+
+def classification_output_schema() -> dict:
+    """JSON Schema for one batch's structured output (claude -p --json-schema)."""
+    return {
+        "type": "object",
+        "properties": {
+            "classifications": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "type": {"type": "string", "enum": ["ticker_specific", "macro_political", "sector", "noise"]},
+                        "tickers": {"type": "array", "items": {"type": "string"}},
+                        "category": {"type": "string"},
+                        "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+                        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "affected_sectors": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["index", "type"],
+                },
+            },
+        },
+        "required": ["classifications"],
+    }
+
+
 def _classify_batch(
     headlines: list[str], published_ats: list[datetime],
     alpaca_ids: list[str | None] | None = None,
@@ -342,9 +403,7 @@ def _classify_batch(
     *, session_id: int | None = None,
 ) -> list[ClassificationResult]:
     """Classify a single batch of headlines in one Claude Haiku call."""
-    headlines_block = "\n".join(
-        f'{i + 1}. "{_sanitize_headline(h)}"' for i, h in enumerate(headlines)
-    )
+    headlines_block = build_batch_user_message(headlines)
 
     client = get_claude_client()
     # P2.20: retry on rate limits / transient 5xx. Without this, a single 429
@@ -372,33 +431,7 @@ def _classify_batch(
         alpaca_ids = [None] * len(headlines)
     if summaries is None:
         summaries = [""] * len(headlines)
-
-    # P2.15: index-based mapping instead of positional zip. Haiku may reorder
-    # or truncate the array; previously parsed[i] paired with headlines[i]
-    # silently, planting wrong tickers/sentiments on wrong headlines.
-    by_idx: dict[int, dict] = {}
-    for entry in parsed:
-        if not isinstance(entry, dict):
-            continue
-        idx = entry.get("index")
-        if isinstance(idx, int) and 1 <= idx <= len(headlines):
-            by_idx[idx - 1] = entry
-
-    results = []
-    for i in range(len(headlines)):
-        entry = by_idx.get(i)
-        if entry is None:
-            results.append(ClassificationResult(
-                news_type="noise", ticker_signals=[], macro_signal=None
-            ))
-        else:
-            results.append(
-                _build_classification_result(
-                    entry, headlines[i], published_ats[i], alpaca_ids[i], summaries[i]
-                )
-            )
-
-    return results
+    return parse_batch_entries(parsed, headlines, published_ats, alpaca_ids, summaries)
 
 
 def classify_ticker_news(

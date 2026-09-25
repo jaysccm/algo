@@ -99,6 +99,11 @@ class SessionResult:
     # rather than treating "nothing to do" as a failure.
     idempotent_skip: str | None = None
 
+    # Same early-return shape as idempotent_skip, but for a refused flag
+    # combination: nothing ran and no row was touched, yet it is an operator
+    # error, so has_errors is true and main() exits 2 rather than 0.
+    refused: str | None = None
+
     skipped_pipeline: bool = False
     skipped_ideation: bool = False
     skipped_executor: bool = False
@@ -109,7 +114,11 @@ class SessionResult:
 
     @property
     def has_errors(self) -> bool:
-        return any(getattr(self, f) for f in _ERROR_FIELDS) or bool(self.prior_stage_errors)
+        return (
+            any(getattr(self, f) for f in _ERROR_FIELDS)
+            or bool(self.prior_stage_errors)
+            or bool(self.refused)
+        )
 
 
 def _start_stage(session_id: int | None, stage: str) -> None:
@@ -650,6 +659,20 @@ def run_session(
         result.duration_seconds = time.monotonic() - start
         return result
 
+    # --resume reopens the day's REAL session row. A dry run on top of it
+    # would write dry-run stage results (e.g. an executor 'completed' with
+    # simulated fills) onto that row, and the next real --resume would then
+    # skip the executor and place no trades. Refuse before any DB access.
+    if resume and dry_run:
+        result = SessionResult()
+        result.refused = (
+            "--resume cannot be combined with --dry-run: it would write dry-run "
+            "stage results onto the real session row for the day"
+        )
+        logger.error("%s", result.refused)
+        result.duration_seconds = time.monotonic() - start
+        return result
+
     # P1.12: --dry-run was misleading — it only gated the executor's order
     # submission, leaving the strategist (writes theses/playbooks/memos) and
     # reflection (writes rules/memos/identity) and the dashboard publisher
@@ -741,6 +764,11 @@ def main():
         force=args.force,
         resume=args.resume,
     )
+    if result.refused:
+        # Refused flag combination: nothing ran, but it is not a no-op the
+        # caller asked for, so exit nonzero (2, argparse's usage-error code).
+        logger.error("Session refused: %s", result.refused)
+        sys.exit(2)
     if result.idempotent_skip:
         # T2.1: nothing to do, not a failure. Exit 0 so cron/Taskfile
         # callers don't alert on a re-run.

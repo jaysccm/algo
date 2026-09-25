@@ -675,6 +675,40 @@ class TestSessionIdempotency:
         assert result.prior_stage_errors == {}
         mock_fail.assert_called_once_with(5, "boom")
 
+    def test_resume_with_dry_run_is_refused_before_any_db_access(self):
+        """--resume --dry-run would write dry-run stage results onto the real
+        session row; it must be refused without touching any row or stage."""
+        with patch("v2.session.get_session_for_date", return_value={"id": 7, "status": "failed"}) as mock_get, \
+             patch("v2.session.insert_session_record") as mock_insert, \
+             patch("v2.session.reopen_session") as mock_reopen, \
+             patch("v2.session.complete_session") as mock_complete, \
+             patch("v2.session.fail_session") as mock_fail, \
+             patch("v2.session.insert_session_stage") as mock_stage, \
+             patch("v2.session.expire_stale_playbook_actions") as mock_expire, \
+             patch("v2.session.run_backfill") as mock_backfill, \
+             patch("v2.session.run_pipeline") as mock_pipeline, \
+             patch("v2.session.run_trading_session") as mock_trader:
+            result = run_session(dry_run=True, resume=True)
+        assert result.refused and "--dry-run" in result.refused
+        assert result.idempotent_skip is None
+        assert result.has_errors is True
+        for m in (mock_get, mock_insert, mock_reopen, mock_complete, mock_fail,
+                  mock_stage, mock_expire, mock_backfill, mock_pipeline, mock_trader):
+            m.assert_not_called()
+
+    def test_main_exits_nonzero_for_resume_with_dry_run(self):
+        import sys
+
+        from v2.session import main
+        with patch.object(sys, "argv", ["session", "--resume", "--dry-run"]), \
+             patch("v2.session.setup_logging"), \
+             patch("v2.session.insert_session_record") as mock_insert, \
+             patch("v2.session.reopen_session") as mock_reopen, pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code != 0
+        mock_insert.assert_not_called()
+        mock_reopen.assert_not_called()
+
     def test_main_accepts_resume_flag(self):
         import sys
 
@@ -683,6 +717,7 @@ class TestSessionIdempotency:
              patch("v2.session.setup_logging"), \
              patch("v2.session.run_session") as mock_run:
             mock_run.return_value.idempotent_skip = None
+            mock_run.return_value.refused = None
             mock_run.return_value.has_errors = False
             main()
         assert mock_run.call_args.kwargs["resume"] is True

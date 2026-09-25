@@ -82,8 +82,9 @@ The session orchestrator runs stages sequentially. Each stage is independent —
 
 A session is idempotent per market date: if ANY session row already exists
 for the date (completed, failed, or running), a re-run is a no-op unless
-`--force` is passed. Deliberate retries after a failure need `--force`.
+`--force` or `--resume` is passed. Deliberate retries after a failure use one of them.
 `--resume` reopens the day's latest session row and skips its completed stages; `--force` starts a fresh row and reruns everything.
+`--resume` reuses the latest row for the date whatever mode created it (it refuses `--dry-run` itself), so don't `--resume` a day whose latest row came from a dry run.
 
 The dashboard renders permalinks at `/mistakes/` and `/attribution/`
 (surfacing closed losers + retired rules, and best/worst signal types

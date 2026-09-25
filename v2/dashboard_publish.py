@@ -1347,6 +1347,45 @@ def summarize_changelog_commits(commits: list[dict],
         return []
 
 
+def emit_changelog_commits() -> dict:
+    """Driver mode: the commits since the last publish plus the prompt payload."""
+    publish_sha = get_current_git_sha()
+    if not publish_sha:
+        return {"publish_sha": None, "last_published_sha": None, "commits": [], "user_message": ""}
+    with get_cursor() as cur:
+        last_published_sha = get_changelog_pointer(cur)
+    commits = fetch_changelog_commits(from_sha=last_published_sha, to_sha=publish_sha)
+    return {
+        "publish_sha": publish_sha,
+        "last_published_sha": last_published_sha,
+        "commits": commits,
+        "user_message": _changelog_prompt(commits) if commits else "",
+    }
+
+
+def changelog_output_schema() -> dict:
+    """JSON Schema for the changelog summariser's structured output."""
+    return {
+        "type": "object",
+        "properties": {
+            "entries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "bullets": {"type": "array", "items": {"type": "string"}},
+                        "commit_shas": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["title", "summary", "bullets", "commit_shas"],
+                },
+            },
+        },
+        "required": ["entries"],
+    }
+
+
 def store_changelog_commits(cur, commits: list[dict]) -> None:
     """Persist changelog commits idempotently."""
     for commit in commits:
@@ -1650,8 +1689,15 @@ class DashboardStageResult:
     errors: list[str] = field(default_factory=list)
 
 
-def run_dashboard_stage(session_date: date | None = None) -> DashboardStageResult:
-    """Run the full dashboard publish pipeline: gather -> assemble -> deploy."""
+def run_dashboard_stage(session_date: date | None = None, *,
+                        changelog_entries: list[dict] | None = None,
+                        changelog_commits: list[dict] | None = None) -> DashboardStageResult:
+    """Run the full dashboard publish pipeline: gather -> assemble -> deploy.
+
+    When `changelog_entries` is supplied (driver mode), those entries are
+    validated against `changelog_commits` (or the freshly fetched commits)
+    and stored instead of calling `summarize_changelog_commits`.
+    """
     if session_date is None:
         session_date = date.today()
 
@@ -1689,7 +1735,10 @@ def run_dashboard_stage(session_date: date | None = None) -> DashboardStageResul
                     to_sha=publish_sha,
                 )
                 store_changelog_commits(cur, commits)
-                entries = summarize_changelog_commits(commits)
+                if changelog_entries is not None:
+                    entries = validate_changelog_entries(changelog_entries, changelog_commits or commits)
+                else:
+                    entries = summarize_changelog_commits(commits)
                 if entries:
                     store_changelog_entries(
                         cur,
@@ -1731,3 +1780,45 @@ def run_dashboard_stage(session_date: date | None = None) -> DashboardStageResul
             logger.error("Failed to update changelog pointer: %s", e)
     logger.info("Dashboard publish complete (published=%s)", result.published)
     return result
+
+
+def main() -> int:
+    import argparse
+
+    from .log_config import setup_logging
+
+    setup_logging()
+    parser = argparse.ArgumentParser(description="Publish the public dashboard")
+    parser.add_argument("--emit-changelog-commits", metavar="PATH",
+                        help="Driver mode: write commits since last publish + prompt payload to PATH")
+    parser.add_argument("--changelog-entries", metavar="PATH",
+                        help="Driver mode: claude result JSON whose structured_output.entries to store")
+    parser.add_argument("--changelog-commits", metavar="PATH", help="The file written by --emit-changelog-commits")
+    args = parser.parse_args()
+
+    if args.emit_changelog_commits:
+        with open(args.emit_changelog_commits, "w") as fh:
+            json.dump(emit_changelog_commits(), fh, default=str)
+        return 0
+
+    kwargs = {}
+    if args.changelog_entries:
+        with open(args.changelog_entries) as fh:
+            result = json.load(fh)
+        kwargs["changelog_entries"] = (result.get("structured_output") or {}).get("entries") or []
+        commits = []
+        if args.changelog_commits:
+            with open(args.changelog_commits) as fh:
+                commits = json.load(fh).get("commits") or []
+        kwargs["changelog_commits"] = commits
+    result = run_dashboard_stage(**kwargs)
+    if result.errors:
+        for err in result.errors:
+            logger.error("  - %s", err)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

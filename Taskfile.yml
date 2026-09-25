@@ -259,7 +259,7 @@ tasks:
         msg: "instances/{{.INSTANCE}}.env must contain the line INSTANCE={{.INSTANCE}} (self-naming; compose resolves env_file from it — a mismatch would load another instance's env)"
     deps: [up]
     cmds:
-      - "{{.COMPOSE}} exec trading python -c \"from v2.dashboard_publish import run_dashboard_stage; r = run_dashboard_stage(); print(r); raise SystemExit(0 if r.published or r.skipped else 1)\""
+      - "{{.COMPOSE}} exec trading python -m v2.dashboard_publish"
 
   # ---------------------------------------------------------------------------
   # Dev

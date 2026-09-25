@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from v2 import dashboard_publish as dp
 from v2.dashboard_publish import (
     _build_summary,
     _DecimalEncoder,
@@ -2179,3 +2180,62 @@ class TestComputePerformanceStats:
         with f.open() as fh:
             payload = json.load(fh)
         assert payload["win_rate_pct"] == 60.0
+
+
+class TestChangelogSeam:
+    def test_emit_changelog_commits_reads_pointer_and_builds_payload(self, mock_db):
+        commits = [{"sha": "a" * 40, "short_sha": "aaaaaaa", "committed_at": "t", "subject": "s", "body": "", "files": []}]
+        with patch("v2.dashboard_publish.get_current_git_sha", return_value="b" * 40), \
+             patch("v2.dashboard_publish.get_changelog_pointer", return_value="c" * 40), \
+             patch("v2.dashboard_publish.fetch_changelog_commits", return_value=commits) as fetch:
+            out = dp.emit_changelog_commits()
+        fetch.assert_called_once_with(from_sha="c" * 40, to_sha="b" * 40)
+        assert out["publish_sha"] == "b" * 40 and out["commits"] == commits
+        assert json.loads(out["user_message"])[0]["sha"] == "a" * 40
+
+    def test_emit_changelog_commits_without_sha_is_empty(self):
+        with patch("v2.dashboard_publish.get_current_git_sha", return_value=None):
+            out = dp.emit_changelog_commits()
+        assert out["commits"] == [] and out["publish_sha"] is None
+
+    def test_changelog_output_schema_shape(self):
+        schema = dp.changelog_output_schema()
+        assert schema["required"] == ["entries"]
+        assert set(schema["properties"]["entries"]["items"]["required"]) == {"title", "summary", "bullets", "commit_shas"}
+
+    def test_run_dashboard_stage_uses_supplied_entries_instead_of_llm(self, mock_db, monkeypatch):
+        monkeypatch.setenv("CLOUDFLARE_PAGES_PROJECT", "x")
+        commits = [{"sha": "a" * 40, "short_sha": "aaaaaaa", "committed_at": "t", "subject": "s", "body": "", "files": []}]
+        entries = [{"title": "T", "summary": "S", "bullets": [], "commit_shas": ["a" * 40]}]
+        with patch("v2.dashboard_publish.get_net_deposits", return_value=None), \
+             patch("v2.dashboard_publish.gather_dashboard_data", return_value={}), \
+             patch("v2.dashboard_publish.get_current_git_sha", return_value="b" * 40), \
+             patch("v2.dashboard_publish.get_changelog_pointer", return_value=None), \
+             patch("v2.dashboard_publish.fetch_changelog_commits", return_value=commits), \
+             patch("v2.dashboard_publish.summarize_changelog_commits") as llm, \
+             patch("v2.dashboard_publish.store_changelog_entries") as store, \
+             patch("v2.dashboard_publish.get_recent_changelog_entries", return_value=[]), \
+             patch("v2.dashboard_publish.assemble_deploy_dir"), \
+             patch("v2.dashboard_publish.deploy_to_cloudflare"), \
+             patch("v2.dashboard_publish.persist_changelog_pointer"):
+            result = dp.run_dashboard_stage(changelog_entries=entries, changelog_commits=commits)
+        assert result.published
+        llm.assert_not_called()
+        assert store.call_args.args[1][0]["title"] == "T"
+
+    def test_cli_emit_and_consume(self, tmp_path):
+        out = tmp_path / "c.json"
+        with patch("v2.dashboard_publish.emit_changelog_commits", return_value={"commits": []}), \
+             patch("v2.log_config.setup_logging"), \
+             patch("sys.argv", ["dp", "--emit-changelog-commits", str(out)]):
+            assert dp.main() == 0
+        assert json.loads(out.read_text()) == {"commits": []}
+        e = tmp_path / "e.json"
+        e.write_text('{"structured_output": {"entries": [{"title": "T"}]}}')
+        c = tmp_path / "cc.json"
+        c.write_text('{"commits": [{"sha": "x"}]}')
+        with patch("v2.dashboard_publish.run_dashboard_stage", return_value=MagicMock(errors=["boom"])) as run, \
+             patch("v2.log_config.setup_logging"), \
+             patch("sys.argv", ["dp", "--changelog-entries", str(e), "--changelog-commits", str(c)]):
+            assert dp.main() == 1
+        assert run.call_args.kwargs == {"changelog_entries": [{"title": "T"}], "changelog_commits": [{"sha": "x"}]}

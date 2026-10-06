@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up Pinchy paper database
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jay
+Group=jay
+WorkingDirectory=/home/jay/services/algo
+Environment=PATH=/home/jay/.local/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+TimeoutStartSec=2h
+ExecStart=/home/jay/services/algo/cron-wrap.sh --ignore-halt paper-backup /home/jay/services/algo/scripts/with-release-image.sh /home/jay/.local/bin/task db:backup INSTANCE=paper

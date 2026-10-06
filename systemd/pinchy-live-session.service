@@ -1,0 +1,15 @@
+[Unit]
+Description=Pinchy live trading session (hiatus: timer must remain disabled)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jay
+Group=jay
+WorkingDirectory=/home/jay/services/algo
+Environment=PATH=/home/jay/.local/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+TimeoutStartSec=6h
+ExecStart=/home/jay/services/algo/cron-wrap.sh --instance live live-session /home/jay/services/algo/scripts/with-release-image.sh /home/jay/services/algo/run-docker.sh live trading python -m v2.session

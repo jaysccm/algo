@@ -100,7 +100,11 @@ class _State:
             OTLPSpanExporter(timeout=_EXPORT_TIMEOUT_S), schedule_delay_millis=2000))
         self.reader = PeriodicExportingMetricReader(
             OTLPMetricExporter(timeout=_EXPORT_TIMEOUT_S),
-            export_interval_millis=60_000, export_timeout_millis=int(_EXPORT_TIMEOUT_S * 1000))
+            # One export per process, at the final flush. A session is a short
+            # process whose counters restart at zero, so periodic mid-run
+            # exports would add duplicate cumulative samples that the
+            # dashboard's sum_over_time() would double count.
+            export_interval_millis=3_600_000, export_timeout_millis=int(_EXPORT_TIMEOUT_S * 1000))
         self.meter_provider = MeterProvider(resource=self.resource, metric_readers=[self.reader])
         # Providers are held privately rather than set globally, so nothing
         # else in the process is instrumented by accident.

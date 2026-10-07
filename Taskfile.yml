@@ -20,6 +20,11 @@ dotenv: [".env.host"]
 # version; task-local vars don't have the problem.
 
 tasks:
+  status:
+    desc: Report Pinchy commit, release image, HALT, containers, timers, and last session/backup
+    cmds:
+      - python3 scripts/status.py
+
   # ---------------------------------------------------------------------------
   # Infrastructure
   # ---------------------------------------------------------------------------

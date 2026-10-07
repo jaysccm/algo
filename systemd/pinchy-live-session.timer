@@ -1,0 +1,11 @@
+[Unit]
+Description=Pinchy live session at 13:00 America/Denver on weekdays (disabled)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 13:00:00 America/Denver
+AccuracySec=1min
+Persistent=false
+Unit=pinchy-live-session.service
+
+[Install]
+WantedBy=timers.target

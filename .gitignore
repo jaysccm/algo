@@ -4,6 +4,7 @@
 .env
 .env.paper
 .env.host
+.release-image
 
 # Instance configs hold secrets. The committed example is the reference;
 # *.HALT sentinels stay tracked so a halt/resume is visible in git.

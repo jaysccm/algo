@@ -41,6 +41,7 @@ class UpdateTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(update, "ROOT", self.root))
         self.stack.enter_context(mock.patch.object(update, "IMAGE_FILE", self.root / ".release-image"))
         self.stack.enter_context(mock.patch.object(update, "call", side_effect=self.fake_call))
+        self.stack.enter_context(mock.patch.object(update, "compose", return_value="db\ntrading\ndashboard"))
 
     def fake_call(self, *args, env=None, stdin=None, check=True):
         self.actions.append(args)
@@ -139,6 +140,15 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.current_ref, self.old_ref)
         self.assertEqual(self.active_units, before_timers)
         self.assertEqual((self.root / ".release-image").read_text().strip(), f"algo:{self.old_ref}")
+
+    def test_stopped_stack_is_not_started_by_update(self):
+        self.stack.enter_context(mock.patch.object(update, "compose", return_value="db"))
+
+        with self.assertRaisesRegex(update.DeployError, "stopped services must stay stopped"):
+            update.deploy(self.new_ref, self.expected_id)
+
+        self.assertEqual(self.current_ref, self.old_ref)
+        self.assertFalse(any(args[:2] == ("sudo", "-n") for args in self.actions))
 
 
 if __name__ == "__main__":

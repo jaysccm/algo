@@ -105,6 +105,14 @@ def check_instance_files() -> None:
         raise DeployError(f"{host_env} is missing or too broadly readable")
 
 
+def check_stack_running(image: str) -> None:
+    expected = {"db", "trading", "dashboard"}
+    for name in INSTANCES:
+        running = set(compose(name, image, "ps", "--status", "running", "--services").splitlines())
+        if running != expected:
+            raise DeployError(f"{name} stack is not fully running; stopped services must stay stopped")
+
+
 def verify_target(ref: str, expected_id: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", ref):
         raise DeployError("Target must be a full 40-character commit SHA")
@@ -182,6 +190,7 @@ def deploy(ref: str, expected_id: str) -> None:
     if not re.fullmatch(r"algo:[0-9a-f]{40}", old_image):
         raise DeployError("No prior release image; initial installation needs a separate rehearsal")
     image = verify_target(ref, expected_id)
+    check_stack_running(old_image)
     for timer in TIMERS:
         enabled(timer)
     if any(enabled(timer) or active(timer) for timer in LIVE_TIMERS):

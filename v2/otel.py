@@ -105,7 +105,8 @@ class _State:
             # exports would add duplicate cumulative samples that the
             # dashboard's sum_over_time() would double count.
             export_interval_millis=3_600_000, export_timeout_millis=int(_EXPORT_TIMEOUT_S * 1000))
-        self.meter_provider = MeterProvider(resource=self.resource, metric_readers=[self.reader])
+        self.meter_provider = MeterProvider(resource=self.resource, metric_readers=[self.reader],
+                                         shutdown_on_exit=False)  # the atexit export would duplicate samples
         # Providers are held privately rather than set globally, so nothing
         # else in the process is instrumented by accident.
         self.tracer = self.tracer_provider.get_tracer("v2.otel")

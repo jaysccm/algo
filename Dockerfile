@@ -11,8 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV PYTHONPATH=/app
 
 COPY ./v2/requirements.txt .
-RUN pip install --no-cache-dir -r ./requirements.txt
+COPY ./dashboard/requirements.txt ./dashboard/requirements.txt
+RUN pip install --no-cache-dir -r ./requirements.txt -r ./dashboard/requirements.txt
+
+# A release image carries the code it runs. The development Compose file may
+# still bind-mount sources, but compose.release.yml uses only these copies.
+COPY ./v2 ./v2
+COPY ./trading ./trading
+COPY ./dashboard ./dashboard
+COPY ./public_dashboard ./public_dashboard
+COPY ./db ./db
 
 CMD ["python", "-m", "v2.main"]

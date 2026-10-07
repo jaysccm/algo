@@ -1,0 +1,15 @@
+# Use with docker-compose.yml and DEPLOY_IMAGE=<tested image tag>.
+# This override removes development source mounts and build instructions so
+# the runtime code comes from the verified release image.
+services:
+  trading:
+    image: ${DEPLOY_IMAGE:?set DEPLOY_IMAGE to the tested image tag}
+    build: !reset null
+    volumes: !override
+      - ${LOGS_DIR:?}:/app/logs
+
+  dashboard:
+    image: ${DEPLOY_IMAGE:?set DEPLOY_IMAGE to the tested image tag}
+    build: !reset null
+    volumes: !reset []
+    command: ["python", "dashboard/app.py"]

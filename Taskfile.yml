@@ -334,7 +334,7 @@ tasks:
         done
 
   db:backup:
-    desc: pg_dump the instance db to backups/<instance>-<ts>.dump (keeps newest 14; set ALGO_BACKUP_COPY_DIR for an off-WSL copy)
+    desc: pg_dump the instance db to backups/<instance>-<ts>.dump (keeps newest 14; set ALGO_BACKUP_COPY_DIR for a second copy)
     requires: { vars: [INSTANCE] }
     vars:
       COMPOSE: docker compose -p pinchy-{{.INSTANCE}} --env-file instances/{{.INSTANCE}}.env
@@ -346,14 +346,25 @@ tasks:
     deps: [up]
     cmds:
       - |
+        set -eu
         mkdir -p backups
         f="backups/{{.INSTANCE}}-$(date +%Y%m%d-%H%M%S).dump"
-        {{.COMPOSE}} exec -T db pg_dump -U algo -d trading -Fc > "$f"
-        echo "==> wrote $f ($(du -h "$f" | cut -f1))"
-        ls -t backups/{{.INSTANCE}}-*.dump | tail -n +15 | xargs -r rm --
+        tmp="$f.partial"
+        copy_tmp=""
+        trap 'rm -f "$tmp"; if [ -n "$copy_tmp" ]; then rm -f "$copy_tmp"; fi' EXIT
+        {{.COMPOSE}} exec -T db pg_dump -U algo -d trading -Fc > "$tmp"
+        {{.COMPOSE}} exec -T db pg_restore -l < "$tmp" > /dev/null
+        mv "$tmp" "$f"
         if [ -n "${ALGO_BACKUP_COPY_DIR:-}" ]; then
-          mkdir -p "$ALGO_BACKUP_COPY_DIR" && cp "$f" "$ALGO_BACKUP_COPY_DIR"/ && echo "==> copied to $ALGO_BACKUP_COPY_DIR"
+          mkdir -p "$ALGO_BACKUP_COPY_DIR"
+          copy_tmp="$ALGO_BACKUP_COPY_DIR/$(basename "$f").partial"
+          cp "$f" "$copy_tmp"
+          cmp -s "$f" "$copy_tmp"
+          mv "$copy_tmp" "$ALGO_BACKUP_COPY_DIR/$(basename "$f")"
+          echo "==> copied to $ALGO_BACKUP_COPY_DIR"
         fi
+        ls -t backups/{{.INSTANCE}}-*.dump | tail -n +15 | xargs -r rm --
+        echo "==> wrote $f ($(du -h "$f" | cut -f1))"
 
   db:restore:
     desc: "pg_restore a dump into the instance db (task db:restore INSTANCE=x FILE=backups/foo.dump). DESTRUCTIVE: --clean drops existing objects first."

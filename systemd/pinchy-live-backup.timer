@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up Pinchy live database at 20:00 America/Denver on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 20:00:00 America/Denver
+AccuracySec=1min
+Persistent=false
+Unit=pinchy-live-backup.service
+
+[Install]
+WantedBy=timers.target

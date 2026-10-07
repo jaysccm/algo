@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Pinchy paper session at 12:30 America/Denver on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 12:30:00 America/Denver
+AccuracySec=1min
+Persistent=false
+Unit=pinchy-paper-session.service
+
+[Install]
+WantedBy=timers.target

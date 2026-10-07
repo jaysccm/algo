@@ -371,6 +371,7 @@ tasks:
     cmds:
       - |
         set -eu
+        umask 077
         mkdir -p backups
         f="backups/{{.INSTANCE}}-$(date +%Y%m%d-%H%M%S).dump"
         tmp="$f.partial"

@@ -18,6 +18,10 @@ services expect the checkout at `/home/jay/services/algo`, go-task at
 `/home/jay/.local/bin/task`, and instance files plus `.env.host` on that host.
 Verify those paths and file permissions before installing. The source host's
 `instances/live.HALT` must be present in the destination checkout.
+At cutover, set `ALGO_DASHBOARD_PUBLISH=true` and the Cloudflare Pages
+settings in bee's paper env, and `ALGO_DASHBOARD_PUBLISH=false` in bee's live
+env. Keep exactly one scheduled publisher; jaywin currently has the opposite
+flags and its paper job must be disabled before bee's timer is enabled.
 The updater must write a checked, prebuilt tag such as `algo:<40-hex-commit>`
 to the gitignored `.release-image` file. The job wrapper rejects a missing or
 invalid tag and sets the release Compose override for Taskfile/Compose commands.

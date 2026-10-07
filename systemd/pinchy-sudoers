@@ -1,0 +1,10 @@
+# Narrow systemd timer control for Pinchy's updater, installed only after review.
+Cmnd_Alias PINCHY_TIMERS = \
+    /usr/bin/systemctl stop pinchy-paper-session.timer, \
+    /usr/bin/systemctl start pinchy-paper-session.timer, \
+    /usr/bin/systemctl stop pinchy-live-backup.timer, \
+    /usr/bin/systemctl start pinchy-live-backup.timer, \
+    /usr/bin/systemctl stop pinchy-paper-backup.timer, \
+    /usr/bin/systemctl start pinchy-paper-backup.timer
+
+jay ALL=(root) NOPASSWD: PINCHY_TIMERS

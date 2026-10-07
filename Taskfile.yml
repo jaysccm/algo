@@ -346,6 +346,12 @@ tasks:
             echo "==> skipping $name (already applied)"
             continue
           fi
+          # Historical migrations marked as superseded cannot run against the
+          # current fresh-volume schema. Their effects were removed later.
+          if grep -q '^-- mirror-check: skip' "$f"; then
+            echo "==> skipping $name (superseded)"
+            continue
+          fi
           echo "==> applying $name"
           { cat "$f"; printf "\nINSERT INTO schema_migrations (filename) VALUES ('%s');\n" "$name"; } \
             | psql_exec -v ON_ERROR_STOP=1 --single-transaction -f -

@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up Pinchy paper database at 20:05 America/Denver on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 20:05:00 America/Denver
+AccuracySec=1min
+Persistent=false
+Unit=pinchy-paper-backup.service
+
+[Install]
+WantedBy=timers.target

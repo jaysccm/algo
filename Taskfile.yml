@@ -20,6 +20,11 @@ dotenv: [".env.host"]
 # version; task-local vars don't have the problem.
 
 tasks:
+  status:
+    desc: Report Pinchy commit, release image, HALT, containers, timers, and last session/backup
+    cmds:
+      - python3 scripts/status.py
+
   # ---------------------------------------------------------------------------
   # Infrastructure
   # ---------------------------------------------------------------------------
@@ -35,6 +40,19 @@ tasks:
         msg: "instances/{{.INSTANCE}}.env must contain the line INSTANCE={{.INSTANCE}} (self-naming; compose resolves env_file from it — a mismatch would load another instance's env)"
     cmds:
       - "{{.COMPOSE}} up -d"
+
+  db:up:
+    desc: Start only the instance database
+    requires: { vars: [INSTANCE] }
+    vars:
+      COMPOSE: docker compose -p pinchy-{{.INSTANCE}} --env-file instances/{{.INSTANCE}}.env
+    preconditions:
+      - sh: test -f instances/{{.INSTANCE}}.env
+        msg: "No such instance: instances/{{.INSTANCE}}.env"
+      - sh: grep -qx "INSTANCE={{.INSTANCE}}" instances/{{.INSTANCE}}.env
+        msg: "instances/{{.INSTANCE}}.env must contain INSTANCE={{.INSTANCE}}"
+    cmds:
+      - "{{.COMPOSE}} up -d --no-build db"
 
   down:
     desc: Stop the instance's services
@@ -316,7 +334,7 @@ tasks:
         msg: "No such instance: instances/{{.INSTANCE}}.env"
       - sh: grep -qx "INSTANCE={{.INSTANCE}}" instances/{{.INSTANCE}}.env
         msg: "instances/{{.INSTANCE}}.env must contain the line INSTANCE={{.INSTANCE}} (self-naming; compose resolves env_file from it — a mismatch would load another instance's env)"
-    deps: [up]
+    deps: [db:up]
     cmds:
       - |
         psql_exec() { {{.COMPOSE}} exec -T db psql -U algo -d trading "$@"; }
@@ -326,6 +344,12 @@ tasks:
           applied=$(psql_exec -tAc "SELECT 1 FROM schema_migrations WHERE filename = '$name'")
           if [ "$applied" = "1" ]; then
             echo "==> skipping $name (already applied)"
+            continue
+          fi
+          # Historical migrations marked as superseded cannot run against the
+          # current fresh-volume schema. Their effects were removed later.
+          if grep -q '^-- mirror-check: skip' "$f"; then
+            echo "==> skipping $name (superseded)"
             continue
           fi
           echo "==> applying $name"

@@ -41,6 +41,19 @@ tasks:
     cmds:
       - "{{.COMPOSE}} up -d"
 
+  db:up:
+    desc: Start only the instance database
+    requires: { vars: [INSTANCE] }
+    vars:
+      COMPOSE: docker compose -p pinchy-{{.INSTANCE}} --env-file instances/{{.INSTANCE}}.env
+    preconditions:
+      - sh: test -f instances/{{.INSTANCE}}.env
+        msg: "No such instance: instances/{{.INSTANCE}}.env"
+      - sh: grep -qx "INSTANCE={{.INSTANCE}}" instances/{{.INSTANCE}}.env
+        msg: "instances/{{.INSTANCE}}.env must contain INSTANCE={{.INSTANCE}}"
+    cmds:
+      - "{{.COMPOSE}} up -d --no-build db"
+
   down:
     desc: Stop the instance's services
     requires: { vars: [INSTANCE] }
@@ -321,7 +334,7 @@ tasks:
         msg: "No such instance: instances/{{.INSTANCE}}.env"
       - sh: grep -qx "INSTANCE={{.INSTANCE}}" instances/{{.INSTANCE}}.env
         msg: "instances/{{.INSTANCE}}.env must contain the line INSTANCE={{.INSTANCE}} (self-naming; compose resolves env_file from it — a mismatch would load another instance's env)"
-    deps: [up]
+    deps: [db:up]
     cmds:
       - |
         psql_exec() { {{.COMPOSE}} exec -T db psql -U algo -d trading "$@"; }

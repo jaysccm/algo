@@ -22,6 +22,17 @@ The updater must write a checked, prebuilt tag such as `algo:<40-hex-commit>`
 to the gitignored `.release-image` file. The job wrapper rejects a missing or
 invalid tag and sets the release Compose override for Taskfile/Compose commands.
 
+Routine updates use `scripts/update.py <full-commit>` with
+`EXPECTED_IMAGE_ID=sha256:<image-id>` supplied by the verified release workflow.
+The updater requires a prior `.release-image`, checks that no job is running,
+pauses only active timers, makes and validates both backups, applies migrations
+with only the database up, starts the prebuilt image, checks the database and
+dashboard, then restores the prior timer state. If the new code fails, it
+restores the previous code and image; it cannot undo schema migrations.
+`systemd/pinchy-sudoers` lists only the timer start/stop commands it needs.
+Validate that file with `visudo -cf` before installing it. Initial installation
+and database restore are separate from this routine updater.
+
 Installation should copy the unit files into `/etc/systemd/system/` and run
 `systemctl daemon-reload`, leaving all timers disabled until the data and
 schedule cutover. Enabling a timer before disabling the corresponding jaywin

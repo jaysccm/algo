@@ -1,0 +1,15 @@
+# Optional override: join the shared telemetry stack's Docker network so the
+# trading container can reach the OTLP receiver at http://lgtm:4318 (JAY-92).
+# Kept out of docker-compose.yml so a host without the `telemetry` network
+# still starts every instance exactly as before. Use:
+#   docker compose -p pinchy-<name> --env-file instances/<name>.env \
+#     -f docker-compose.yml -f compose.telemetry.yml up -d
+# Telemetry itself stays off until OTEL_EXPORTER_OTLP_ENDPOINT is set in
+# instances/<name>.env.
+services:
+  trading:
+    networks: [default, telemetry]
+
+networks:
+  telemetry:
+    external: true

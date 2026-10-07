@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from . import otel
 from .agent import DEFAULT_EXECUTOR_MODEL
 from .attribution import build_attribution_constraints, compute_signal_attribution
 from .backfill import run_backfill
@@ -102,6 +103,7 @@ class SessionResult:
 
 
 def _start_stage(session_id: int | None, stage: str) -> None:
+    otel.stage_start(stage)
     if session_id is None:
         return
     try:
@@ -111,6 +113,7 @@ def _start_stage(session_id: int | None, stage: str) -> None:
 
 
 def _complete_stage(session_id: int | None, stage: str, usage=None) -> None:
+    otel.stage_end(stage, ok=True, usage=usage)
     if session_id is None:
         return
     try:
@@ -120,6 +123,7 @@ def _complete_stage(session_id: int | None, stage: str, usage=None) -> None:
 
 
 def _fail_stage(session_id: int | None, stage: str, error: str, usage=None) -> None:
+    otel.stage_end(stage, ok=False, usage=usage)
     if session_id is None:
         return
     try:
@@ -448,6 +452,9 @@ def _run_executor_stage(
                 session_id=session_id,
                 session_date=session_date,
             )
+            otel.record_executor(
+                result.trading_result.trades_executed, result.trading_result.trades_failed,
+            )
             if result.trading_result.market_closed:
                 if session_id is not None:
                     try:
@@ -597,6 +604,7 @@ def run_session(
         )
         logger.warning("%s", result.idempotent_skip)
         result.duration_seconds = time.monotonic() - start
+        otel.record_skipped_session()
         return result
 
     # P1.12: --dry-run was misleading — it only gated the executor's order
@@ -640,8 +648,10 @@ def run_session(
         # and exits 0 with a "nothing to do" log line.
         result.idempotent_skip = early_error
         result.duration_seconds = time.monotonic() - start
+        otel.record_skipped_session()
         return result
 
+    otel.begin_session(dry_run=dry_run)
     try:
         attribution_constraints = _run_learning_refresh(result, session_id, completed_stages)
         _run_supervisor_stage(result, session_id, completed_stages, skip_supervisor)
@@ -656,6 +666,7 @@ def run_session(
     finally:
         result.duration_seconds = time.monotonic() - start
         _finalize_session(result, session_id)
+        otel.end_session("failed" if result.has_errors else "success", result.duration_seconds)
     return result
 
 

@@ -35,8 +35,12 @@ used. Targets are unprefixed (`up`, `down`, `session`, `db:migrate`,
 `paper:*` or `docker:*` target family.
 
 Planned instances at cutover: `live` (`DB_HOST_PORT=5432`,
-`DASHBOARD_HOST_PORT=3000`, publishes the public dashboard) and `paper`
-(`5433`/`3001`, does not publish). Each instance has its own compose
+`DASHBOARD_HOST_PORT=3000`, public dashboard publishing disabled, trading
+HALT retained) and `paper` (`5433`/`3001`, publishes the public dashboard).
+This publisher switch is Jay's 2026-10-06 migration decision; jaywin's current
+env files still have the opposite flags until cutover. The paper env on bee
+must receive the Cloudflare settings before a publish is attempted.
+Each instance has its own compose
 project, Postgres volume, ports, and logs directory, so data never crosses
 between instances.
 

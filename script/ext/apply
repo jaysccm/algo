@@ -3,5 +3,6 @@
 # image. Never builds (the image was built and tested on the release host). Schema migrations cannot be undone by rollback.
 set -eu
 . "$(dirname "$0")/_common.sh"
+echo "APPLIED=1" >> "$STATE"
 write_image "$DEPLOY_IMAGE"
 migrate_and_start "$DEPLOY_IMAGE"

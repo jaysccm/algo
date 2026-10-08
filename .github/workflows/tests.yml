@@ -75,6 +75,7 @@ jobs:
         run: |
           for f in script/bootstrap script/setup script/update script/deploy script/status script/test script/ext/*; do sh -n "$f"; done
           for h in bootstrap setup pre-update apply verify rollback post-update status test; do test -x script/ext/$h; done
+          sh tests/hooks/release_update.sh
 
       - name: Ruff
         run: ruff check .

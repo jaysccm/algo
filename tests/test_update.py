@@ -4,10 +4,9 @@ import os
 import tempfile
 import unittest
 from contextlib import ExitStack
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
-
-from importlib.machinery import SourceFileLoader
 
 update = SourceFileLoader(
     "pinchy_update", str(Path(__file__).resolve().parent.parent / "script" / "ext" / "update")

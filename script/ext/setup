@@ -1,0 +1,20 @@
+#!/bin/sh
+# Prepare a fresh checkout; starts nothing. Creates instances/live.env and instances/paper.env from instances/example.env when
+# absent (mode 600, with their self-naming INSTANCE line) and checks the live HALT sentinel is present. A first install on a
+# host is deliberately NOT automated: database restore, systemd units, the sudoers rule and timer enablement follow the
+# reviewed cutover runbook (Big Brother runbooks/deploy-algo.md) and need Jay's go-ahead; script/update refuses to perform
+# a first install (it needs running stacks and a prior release marker).
+set -eu
+cd "$(dirname "$0")/../.."
+for name in live paper; do
+  f=instances/$name.env
+  if [ ! -e "$f" ]; then
+    cp instances/example.env "$f"
+    sed -i "s/^INSTANCE=.*/INSTANCE=$name/" "$f"
+    grep -qx "INSTANCE=$name" "$f" || echo "INSTANCE=$name" >> "$f"
+    chmod 600 "$f"
+    echo "created $f from instances/example.env; fill in the values (never commit it)"
+  fi
+done
+[ -f instances/live.HALT ] || { echo "instances/live.HALT is missing: live trading must stay halted" >&2; exit 1; }
+echo "files prepared; next steps are in the cutover runbook (no stack was started, no timer enabled)"

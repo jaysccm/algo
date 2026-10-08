@@ -1,0 +1,19 @@
+#!/bin/sh
+# Prints scripts/status.py, then fails (non-zero) if: the live HALT sentinel is missing, a live trading timer is enabled or
+# active, an instance does not have db, trading and dashboard running, or the paper timers are not enabled.
+set -u
+cd "$(dirname "$0")/../.."
+python3 scripts/status.py
+rc=0
+[ -f instances/live.HALT ] || { echo "PROBLEM: instances/live.HALT is missing"; rc=1; }
+for t in pinchy-live-session.timer pinchy-weekly-learn.timer; do
+  { systemctl is-enabled --quiet "$t" || systemctl is-active --quiet "$t"; } && { echo "PROBLEM: $t must stay disabled"; rc=1; }
+done
+for t in pinchy-paper-session.timer pinchy-paper-backup.timer pinchy-live-backup.timer; do
+  systemctl is-enabled --quiet "$t" || { echo "PROBLEM: $t is not enabled"; rc=1; }
+done
+for i in live paper; do
+  running=$(docker ps --filter "label=com.docker.compose.project=pinchy-$i" --filter status=running --format '{{.Label "com.docker.compose.service"}}' | sort | tr '\n' ' ')
+  [ "$running" = "dashboard db trading " ] || { echo "PROBLEM: $i is running [${running% }], expected dashboard db trading"; rc=1; }
+done
+exit "$rc"

@@ -42,3 +42,13 @@ Installation should copy the unit files into `/etc/systemd/system/` and run
 `systemctl daemon-reload`, leaving all timers disabled until the data and
 schedule cutover. Enabling a timer before disabling the corresponding jaywin
 cron entry can produce overlapping work against the same Alpaca account.
+
+## Standard scripts (JAY-147)
+
+The checkout also exposes the shared `script/` entry points (vendored from `jaysccm/actions` `strta/`, see `script/VENDORED`;
+Pinchy's logic is in `script/ext/`). `script/deploy <full-commit>` runs `scripts/update.py` (release mode only: it needs
+`DEPLOY_IMAGE=algo:<commit>` and `EXPECTED_IMAGE_ID`, which `host/deploy.sh` passes from the release workflow) and then
+`script/status`, which prints `scripts/status.py` and fails if the live HALT sentinel is missing, a live timer is
+enabled or active, a stack is not fully running, or the paper and backup timers are not enabled. `script/setup` only prepares
+`.env.host` and `instances/*.env` from their templates; a first install stays the reviewed cutover procedure.
+

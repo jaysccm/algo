@@ -1,0 +1,9 @@
+#!/bin/sh
+# Host prerequisites: Docker with Compose v2, git, Python 3, and go-task at the path the updater and the systemd units use.
+# Installs nothing.
+set -eu
+command -v git >/dev/null || { echo "git is missing" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is missing" >&2; exit 1; }
+docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is missing" >&2; exit 1; }
+docker info >/dev/null 2>&1 || { echo "Docker is unavailable for this user" >&2; exit 1; }
+[ -x /home/jay/.local/bin/task ] || command -v task >/dev/null || { echo "go-task is missing (expected /home/jay/.local/bin/task)" >&2; exit 1; }

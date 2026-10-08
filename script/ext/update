@@ -1,0 +1,8 @@
+#!/bin/sh
+# scripts/update.py owns the whole guarded update, including the checkout: it verifies the full commit and the loaded image
+# ID, requires running stacks and the live HALT sentinel, pauses the timers that were active, backs up and validates both
+# databases, switches the checkout and release image, migrates, waits for health, and on failure restores the previous
+# commit and image with timers stopped if it cannot. HALT and timer state are preserved. script/update only runs this hook.
+set -eu
+cd "$(dirname "$0")/../.."
+exec python3 scripts/update.py "$REF" --expected-image-id "$EXPECTED_IMAGE_ID"

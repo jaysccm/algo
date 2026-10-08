@@ -26,7 +26,7 @@ The updater must write a checked, prebuilt tag such as `algo:<40-hex-commit>`
 to the gitignored `.release-image` file. The job wrapper rejects a missing or
 invalid tag and sets the release Compose override for Taskfile/Compose commands.
 
-Routine updates use `scripts/update.py <full-commit>` with
+Routine updates run `script/update <full-commit>`, whose project hook is `script/ext/update`, with
 `EXPECTED_IMAGE_ID=sha256:<image-id>` supplied by the verified release workflow.
 The updater requires a prior `.release-image`, checks that no job is running,
 refuses either instance if its stack was intentionally stopped,
@@ -46,7 +46,7 @@ cron entry can produce overlapping work against the same Alpaca account.
 ## Standard scripts (JAY-147)
 
 The checkout also exposes the shared `script/` entry points (vendored from `jaysccm/actions` `strta/`, see `script/VENDORED`;
-Pinchy's logic is in `script/ext/`). `script/deploy <full-commit>` runs `scripts/update.py` (release mode only: it needs
+Pinchy's logic is in `script/ext/`). `script/deploy <full-commit>` runs `script/update`, which delegates to `script/ext/update` (release mode only: it needs
 `DEPLOY_IMAGE=algo:<commit>` and `EXPECTED_IMAGE_ID`, which `host/deploy.sh` passes from the release workflow) and then
 `script/status`, which prints `scripts/status.py` and fails if the live HALT sentinel is missing, a live timer is
 enabled or active, a stack is not fully running, or the paper and backup timers are not enabled. `script/setup` only prepares

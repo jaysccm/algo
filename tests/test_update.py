@@ -7,7 +7,11 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
-from scripts import update
+from importlib.machinery import SourceFileLoader
+
+update = SourceFileLoader(
+    "pinchy_update", str(Path(__file__).resolve().parent.parent / "script" / "ext" / "update")
+).load_module()
 
 
 class UpdateTests(unittest.TestCase):

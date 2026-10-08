@@ -1,0 +1,18 @@
+#!/bin/sh
+# The standard does not restore the checkout for a project with a rollback hook, so this does: previous commit, previous
+# release image, migrate and start, health check, then the timers that were active. If pre-update never got as far as
+# recording state nothing was stopped, so only the checkout is restored. If restoring fails the timers stay stopped.
+set -eu
+. "$(dirname "$0")/_common.sh"
+git checkout --quiet --detach "$PREVIOUS_REF"
+[ -f "$STATE" ] || { echo "nothing was stopped or changed; checkout restored"; exit 0; }
+OLD_IMAGE=""; PAUSED=""
+. "$STATE"
+valid_image "$OLD_IMAGE" || fail "rollback state is invalid; timers remain stopped"
+for t in $PAUSED; do sudo -n systemctl stop "$t" || fail "cannot pause $t for rollback; timers remain stopped"; done
+if ! { write_image "$OLD_IMAGE" && migrate_and_start "$OLD_IMAGE" && healthy "$OLD_IMAGE" 120; }; then
+  fail "rollback failed; timers remain stopped"
+fi
+start_timers "$PAUSED" || fail "previous release restored but a timer failed to start"
+rm -f "$STATE"
+echo "previous release restored; database migrations were not reversed"

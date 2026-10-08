@@ -1,0 +1,7 @@
+#!/bin/sh
+# Point the release marker at the verified image, apply migrations with only the databases needed, and start the prebuilt
+# image. Never builds (the image was built and tested on the release host). Schema migrations cannot be undone by rollback.
+set -eu
+. "$(dirname "$0")/_common.sh"
+write_image "$DEPLOY_IMAGE"
+migrate_and_start "$DEPLOY_IMAGE"

@@ -1,8 +1,65 @@
 #!/bin/sh
-# Release mode only, as host/deploy.sh enforced for algo: the tested image must be loaded as algo:<commit> and its image ID
-# supplied by the verified release workflow. Runs before anything is changed.
+# Runs after the standard moved the checkout to REF and before anything is stopped or restarted. Release mode only:
+# DEPLOY_IMAGE must be algo:<commit> (loaded on this host) and EXPECTED_IMAGE_ID the ID the verified release workflow
+# produced. Refuses unless HALT is intact, both stacks fully run, no job is active and the live timers stay disabled; then
+# pauses only the active timers, and makes and validates a backup of both databases. Records .update-state for rollback.
 set -eu
-if [ -z "${DEPLOY_IMAGE:-}" ] || [ "$DEPLOY_IMAGE" != "algo:$REF" ] || [ -z "${EXPECTED_IMAGE_ID:-}" ]; then
-  echo "algo requires a verified release image (DEPLOY_IMAGE=algo:<commit>) and its EXPECTED_IMAGE_ID" >&2
-  exit 1
-fi
+. "$(dirname "$0")/_common.sh"
+rm -f "$STATE"
+
+printf %s "$REF" | grep -Eq '^[0-9a-f]{40}$' || fail "target must be a full 40-character commit SHA"
+[ -n "${DEPLOY_IMAGE:-}" ] && [ "$DEPLOY_IMAGE" = "algo:$REF" ] && [ -n "${EXPECTED_IMAGE_ID:-}" ] ||
+  fail "algo requires a verified release image (DEPLOY_IMAGE=algo:<commit>) and its EXPECTED_IMAGE_ID"
+printf %s "$EXPECTED_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$' || fail "expected image ID must be a full sha256 digest"
+[ "$(docker image inspect --format '{{.Id}}' "$DEPLOY_IMAGE" 2>/dev/null)" = "$EXPECTED_IMAGE_ID" ] ||
+  fail "the loaded $DEPLOY_IMAGE does not match the verified image ID"
+
+for n in $INSTANCES; do
+  f=instances/$n.env
+  [ -f "$f" ] || fail "missing $f"
+  [ $(( 0$(stat -c %a "$f") & 077 )) -eq 0 ] || fail "$f must not be accessible by group or other users"
+done
+[ -f .env.host ] && [ $(( 0$(stat -c %a .env.host) & 077 )) -eq 0 ] || fail ".env.host is missing or too broadly readable"
+
+[ -f instances/live.HALT ] || fail "live HALT sentinel is missing"
+[ "$(halt_markers)" = "$(halt_markers_at "$PREVIOUS_REF")" ] || fail "HALT markers changed at the target commit"
+
+old_image=$(cat "$IMAGE_FILE" 2>/dev/null || true)
+valid_image "$old_image" || fail "no prior release image; initial installation needs a separate rehearsal"
+for n in $INSTANCES; do
+  running=$(compose "$n" "$old_image" ps --status running --services | sort | tr '\n' ' ')
+  [ "$running" = "dashboard db trading " ] || fail "$n stack is not fully running; stopped services must stay stopped"
+done
+for t in $TIMERS; do
+  state=$(systemctl is-enabled "$t" 2>/dev/null || true)
+  case $state in enabled|disabled) ;; *) fail "cannot determine enablement of $t: ${state:-unknown}" ;; esac
+done
+for t in $LIVE_TIMERS; do
+  if unit_enabled "$t" || unit_active "$t"; then fail "live trading timers must remain disabled"; fi
+done
+for j in $JOBS; do unit_active "$j" && fail "a Pinchy job is running; retry after it finishes"; done
+
+paused=""
+for t in $TIMERS; do unit_active "$t" && paused="$paused $t"; done
+{ printf 'OLD_IMAGE=%s\n' "$old_image"; printf 'PAUSED="%s"\n' "${paused# }"; } > "$STATE.partial"
+mv "$STATE.partial" "$STATE"
+
+for t in $paused; do sudo -n systemctl stop "$t" || fail "cannot pause $t"; done
+for j in $JOBS; do unit_active "$j" && fail "a Pinchy job started while timers were being paused"; done
+
+for n in $INSTANCES; do
+  before=$(ls backups/"$n"-*.dump 2>/dev/null | sort || true)
+  task_ "$old_image" db:backup "INSTANCE=$n" >/dev/null || fail "$n backup failed"
+  nl='
+'
+  new=""; count=0
+  for f in backups/"$n"-*.dump; do
+    [ -e "$f" ] || continue
+    case "$nl$before$nl" in *"$nl$f$nl"*) continue ;; esac
+    new=$f; count=$((count + 1))
+  done
+  [ "$count" -eq 1 ] || fail "$n backup did not create exactly one new archive"
+  [ -s "$new" ] || fail "$n backup is empty"
+  compose "$n" "$old_image" exec -T db pg_restore -l < "$new" >/dev/null || fail "$n backup failed validation"
+  echo "validated $n backup: $(basename "$new")"
+done

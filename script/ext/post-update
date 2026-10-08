@@ -1,0 +1,10 @@
+#!/bin/sh
+# Success path: bring back the timers that were active before the update, then print the status report.
+set -eu
+. "$(dirname "$0")/_common.sh"
+[ -f "$STATE" ] || fail "no update state recorded; timers were not touched"
+PAUSED=""
+. "$STATE"
+start_timers "$PAUSED" || fail "a paused timer failed to start; start the timers listed in $STATE by hand"
+rm -f "$STATE"
+python3 scripts/status.py || echo "warning: status command could not report the deployment" >&2

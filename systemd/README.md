@@ -26,14 +26,13 @@ The updater must write a checked, prebuilt tag such as `algo:<40-hex-commit>`
 to the gitignored `.release-image` file. The job wrapper rejects a missing or
 invalid tag and sets the release Compose override for Taskfile/Compose commands.
 
-Routine updates use `scripts/update.py <full-commit>` with
-`EXPECTED_IMAGE_ID=sha256:<image-id>` supplied by the verified release workflow.
-The updater requires a prior `.release-image`, checks that no job is running,
-refuses either instance if its stack was intentionally stopped,
-pauses only active timers, makes and validates both backups, applies migrations
-with only the database up, starts the prebuilt image, checks the database and
-dashboard, then restores the prior timer state. If the new code fails, it
-restores the previous code and image; it cannot undo schema migrations.
+Routine updates run `script/update <full-commit>` (normally through `script/deploy` from `host/deploy.sh`) with
+`DEPLOY_IMAGE=algo:<commit>` and `EXPECTED_IMAGE_ID=sha256:<image-id>` supplied by the verified release workflow. The
+standard moves the checkout, then the hooks in `script/ext/` do the guarded part: `pre-update` requires a prior
+`.release-image`, the loaded image to match the verified ID, HALT intact, both stacks fully running and no job active,
+pauses only active timers, and makes and validates both backups; `apply` migrates with only the databases up and starts the
+prebuilt image; `verify` checks the database, trading and dashboard on the verified image; `post-update` restores the prior
+timer state. On failure `rollback` restores the previous code and image and the timers; it cannot undo schema migrations.
 `systemd/pinchy-sudoers` lists only the timer start/stop commands it needs.
 Validate that file with `visudo -cf` before installing it. Initial installation
 and database restore are separate from this routine updater.
@@ -46,7 +45,7 @@ cron entry can produce overlapping work against the same Alpaca account.
 ## Standard scripts (JAY-147)
 
 The checkout also exposes the shared `script/` entry points (vendored from `jaysccm/actions` `strta/`, see `script/VENDORED`;
-Pinchy's logic is in `script/ext/`). `script/deploy <full-commit>` runs `scripts/update.py` (release mode only: it needs
+Pinchy's logic is in `script/ext/`). `script/deploy <full-commit>` runs `script/update` (release mode only: it needs
 `DEPLOY_IMAGE=algo:<commit>` and `EXPECTED_IMAGE_ID`, which `host/deploy.sh` passes from the release workflow) and then
 `script/status`, which prints `scripts/status.py` and fails if the live HALT sentinel is missing, a live timer is
 enabled or active, a stack is not fully running, or the paper and backup timers are not enabled. `script/setup` only prepares

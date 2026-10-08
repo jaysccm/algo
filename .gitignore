@@ -68,3 +68,4 @@ backups/
 
 # Prepared PR bodies (local only)
 .pr-bodies/
+.update-state

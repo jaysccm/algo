@@ -145,14 +145,17 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.active_units, before_timers)
         self.assertEqual((self.root / ".release-image").read_text().strip(), f"algo:{self.old_ref}")
 
-    def test_stopped_stack_is_not_started_by_update(self):
-        self.stack.enter_context(mock.patch.object(update, "compose", return_value="db"))
+    def test_stopped_stack_is_brought_up_by_update(self):
+        compose = self.stack.enter_context(mock.patch.object(update, "compose", return_value="db"))
+        for name in ("backup", "migrate_and_start", "healthy"):
+            self.stack.enter_context(mock.patch.object(update, name))
 
-        with self.assertRaisesRegex(update.DeployError, "stopped services must stay stopped"):
-            update.deploy(self.new_ref, self.expected_id)
+        update.deploy(self.new_ref, self.expected_id)
 
-        self.assertEqual(self.current_ref, self.old_ref)
-        self.assertFalse(any(args[:2] == ("sudo", "-n") for args in self.actions))
+        self.assertEqual(self.current_ref, self.new_ref)
+        db_up = ("up", "-d", "--no-build", "--pull", "never", "db")
+        for name in update.INSTANCES:
+            self.assertIn(unittest.mock.call(name, f"algo:{self.old_ref}", *db_up), compose.call_args_list)
 
 
 if __name__ == "__main__":

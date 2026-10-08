@@ -29,7 +29,7 @@ invalid tag and sets the release Compose override for Taskfile/Compose commands.
 Routine updates run `script/update <full-commit>`, whose project hook is `script/ext/update`, with
 `EXPECTED_IMAGE_ID=sha256:<image-id>` supplied by the verified release workflow.
 The updater requires a prior `.release-image`, checks that no job is running,
-refuses either instance if its stack was intentionally stopped,
+starts a stopped database so it can be backed up (a deploy converges; HALT and the disabled live timers gate trading, not a stopped stack),
 pauses only active timers, makes and validates both backups, applies migrations
 with only the database up, starts the prebuilt image, checks the database and
 dashboard, then restores the prior timer state. If the new code fails, it

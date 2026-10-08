@@ -1,0 +1,8 @@
+#!/bin/sh
+# .env.host from its template when absent (the standard only knows .env.example / .env.template). Mode 600; fill it in.
+set -eu
+cd "$(dirname "$0")/../.."
+if [ ! -e .env.host ] && [ -f .env.host.example ]; then
+  cp .env.host.example .env.host && chmod 600 .env.host
+  echo "created .env.host from .env.host.example; fill in the values (never commit it)"
+fi

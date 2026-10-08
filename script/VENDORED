@@ -1,0 +1,2 @@
+source: jaysccm/actions strta/script (PR #10)
+Do not edit the standard scripts here; change them in jaysccm/actions and re-vendor. Project logic lives in script/ext/.

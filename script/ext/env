@@ -1,0 +1,3 @@
+# Sourced by every standard script (not a hook). Pinchy keeps host-level settings in .env.host and per-instance
+# settings in instances/<name>.env (live, paper); a stack is a Compose project named pinchy-<instance>.
+ENV_FILE=${ENV_FILE:-$STRTA_ROOT/.env.host}

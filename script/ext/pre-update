@@ -1,0 +1,8 @@
+#!/bin/sh
+# Release mode only, as host/deploy.sh enforced for algo: the tested image must be loaded as algo:<commit> and its image ID
+# supplied by the verified release workflow. Runs before anything is changed.
+set -eu
+if [ -z "${DEPLOY_IMAGE:-}" ] || [ "$DEPLOY_IMAGE" != "algo:$REF" ] || [ -z "${EXPECTED_IMAGE_ID:-}" ]; then
+  echo "algo requires a verified release image (DEPLOY_IMAGE=algo:<commit>) and its EXPECTED_IMAGE_ID" >&2
+  exit 1
+fi

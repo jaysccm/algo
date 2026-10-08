@@ -1,0 +1,7 @@
+#!/bin/sh
+# What CI runs: ruff, then pytest. CI starts Postgres 16 first and sets DATABASE_URL and test credentials; locally set
+# DATABASE_URL to a throwaway database (see .github/workflows/tests.yml).
+set -eu
+cd "$(dirname "$0")/../.."
+ruff check .
+exec pytest "$@"

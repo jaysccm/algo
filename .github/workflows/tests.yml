@@ -71,6 +71,11 @@ jobs:
           PGPASSWORD: algo
         run: db/check_mirror.sh -h localhost -U algo
 
+      - name: Standard lifecycle scripts parse and their hooks are executable
+        run: |
+          for f in script/bootstrap script/setup script/update script/deploy script/status script/test script/ext/*; do sh -n "$f"; done
+          for h in bootstrap setup pre-update update status test; do test -x script/ext/$h; done
+
       - name: Ruff
         run: ruff check .
 

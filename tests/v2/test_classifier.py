@@ -659,6 +659,113 @@ class TestClassifyNewsBatch:
         assert results[0].news_type == "ticker_specific"
         assert results[1].news_type == "noise"
 
+    # -- API errors must not fan out per headline (JAY-170) -----------------
+
+    @staticmethod
+    def _status_error(cls, status: int, message: str):
+        import httpx
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        response = httpx.Response(status, request=request)
+        return cls(message, response=response, body={"error": {"message": message}})
+
+    @patch("v2.classifier.classify_news")
+    @patch("v2.classifier._classify_batch")
+    def test_bad_request_marks_batch_noise_without_fanout(self, mock_batch, mock_individual):
+        """A 400 fails identically per headline; mark the batch noise, move on."""
+        import anthropic
+        mock_batch.side_effect = self._status_error(anthropic.BadRequestError, 400, "max_tokens too large")
+
+        results = classify_news_batch(["H1", "H2", "H3"], [SAMPLE_PUBLISHED_AT] * 3, batch_size=2)
+
+        assert len(results) == 3
+        assert all(r.news_type == "noise" for r in results)
+        mock_individual.assert_not_called()
+        assert mock_batch.call_count == 2, "a plain 400 is per batch; later batches still run"
+
+    @patch("v2.classifier.classify_news")
+    @patch("v2.classifier._classify_batch")
+    def test_credit_balance_error_aborts_remaining_batches(self, mock_batch, mock_individual):
+        """Session 572: 6 failed batches became 306 failed calls on this error."""
+        import anthropic
+        mock_batch.side_effect = self._status_error(
+            anthropic.BadRequestError, 400, "Your credit balance is too low to access the Anthropic API.",
+        )
+
+        results = classify_news_batch(["H1", "H2", "H3"], [SAMPLE_PUBLISHED_AT] * 3, batch_size=1)
+
+        assert len(results) == 3
+        assert all(r.news_type == "noise" for r in results)
+        mock_individual.assert_not_called()
+        assert mock_batch.call_count == 1, "remaining batches are skipped after an account error"
+
+    @patch("v2.classifier.classify_news")
+    @patch("v2.classifier._classify_batch")
+    def test_auth_error_aborts_remaining_batches(self, mock_batch, mock_individual):
+        import anthropic
+        mock_batch.side_effect = self._status_error(anthropic.AuthenticationError, 401, "invalid x-api-key")
+
+        results = classify_news_batch(["H1", "H2"], [SAMPLE_PUBLISHED_AT] * 2, batch_size=1)
+
+        assert [r.news_type for r in results] == ["noise", "noise"]
+        mock_individual.assert_not_called()
+        assert mock_batch.call_count == 1
+
+    @patch("v2.classifier.classify_news")
+    @patch("v2.classifier._classify_batch")
+    def test_server_error_after_retries_marks_noise_without_fanout(self, mock_batch, mock_individual):
+        """_call_with_retry already retried 5xx; 50 more calls will not help."""
+        import anthropic
+        mock_batch.side_effect = self._status_error(anthropic.InternalServerError, 500, "overloaded")
+
+        results = classify_news_batch(["H1", "H2"], [SAMPLE_PUBLISHED_AT] * 2, batch_size=50)
+
+        assert [r.news_type for r in results] == ["noise", "noise"]
+        mock_individual.assert_not_called()
+
+    @patch("v2.classifier.classify_news")
+    @patch("v2.classifier._classify_batch")
+    def test_connection_error_marks_noise_without_fanout(self, mock_batch, mock_individual):
+        import anthropic
+        import httpx
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        mock_batch.side_effect = anthropic.APIConnectionError(request=request)
+
+        results = classify_news_batch(["H1"], [SAMPLE_PUBLISHED_AT], batch_size=50)
+
+        assert results[0].news_type == "noise"
+        mock_individual.assert_not_called()
+
+    @patch("v2.classifier.classify_news")
+    @patch("v2.classifier._classify_batch")
+    def test_shape_error_still_falls_back_per_headline(self, mock_batch, mock_individual):
+        """The model answered but unparseably: per-headline calls can succeed."""
+        mock_batch.side_effect = ValueError("Expected JSON array")
+        noise_result = ClassificationResult(news_type="noise", ticker_signals=[], macro_signal=None)
+        mock_individual.return_value = noise_result
+
+        results = classify_news_batch(["H1", "H2"], [SAMPLE_PUBLISHED_AT] * 2, batch_size=50)
+
+        assert len(results) == 2
+        assert mock_individual.call_count == 2
+
+    @patch("v2.classifier.classify_news")
+    @patch("v2.classifier._classify_batch")
+    def test_fallback_keeps_summary(self, mock_batch, mock_individual):
+        """Rows stored through the fallback used to lose their summary and were
+        then excluded from curated news forever (JAY-172)."""
+        mock_batch.side_effect = ValueError("Expected JSON array")
+        mock_individual.return_value = ClassificationResult(news_type="noise", ticker_signals=[], macro_signal=None)
+
+        classify_news_batch(
+            ["H1"], [SAMPLE_PUBLISHED_AT], batch_size=50,
+            alpaca_ids=["alp-1"], summaries=["the summary"], session_id=42,
+        )
+
+        kwargs = mock_individual.call_args.kwargs
+        assert kwargs["summary"] == "the summary"
+        assert kwargs["alpaca_id"] == "alp-1"
+        assert kwargs["session_id"] == 42
+
     def test_default_batch_size_is_50(self):
         """Verify default batch_size parameter is 50."""
         sig = inspect.signature(classify_news_batch)

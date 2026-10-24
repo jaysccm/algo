@@ -340,6 +340,7 @@ def tool_get_curated_news(
     ticker: str = None,
     days: int = 7,
     target_n: int = 30,
+    session_id: int | None = None,
 ) -> str:
     """Curated news signals — Haiku-filtered to the ~target_n most
     relevant for today's market regime. Use this by default for thesis
@@ -347,6 +348,9 @@ def tool_get_curated_news(
 
     Each line is prefixed with [#<id>] (same format as get_news_signals)
     so signal_refs citation works unchanged.
+
+    `session_id` is bound by the agentic loop (not exposed to the model)
+    so the Haiku filter call lands in agent_events for cost accounting.
     """
     ticker = _norm_ticker(ticker)
     cache_key = (ticker, days, target_n)
@@ -373,6 +377,7 @@ def tool_get_curated_news(
                 candidates,
                 target_n=target_n,
                 regime_context=regime_context,
+                session_id=session_id,
             )
         _curated_news_cache[cache_key] = selected_ids
     else:

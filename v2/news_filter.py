@@ -7,14 +7,19 @@ signals for today.
 
 Degrades gracefully — any error (API failure, malformed JSON,
 all-hallucinated IDs) returns all input IDs so the caller serves the
-firehose unfiltered. Telemetry is the caller's job.
+firehose unfiltered.
+
+The Haiku call is recorded as an `agent_call` event (purpose
+`news_filter`, stage `ideation`) when the caller passes a session_id;
+without one the call is invisible to telemetry and cost accounting
+(JAY-168).
 """
 import json
 import logging
 
 import anthropic
 
-from .claude_client import _call_with_retry, get_claude_client
+from .claude_client import AgentPurpose, _call_with_retry, get_claude_client
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +40,9 @@ story, not multiple variants of the same event).
 Return ONLY the JSON object. No prose. No code fences. No commentary."""
 
 
-def _call_haiku(*, messages: list[dict]):
+def _call_haiku(
+    *, messages: list[dict], session_id: int | None = None, stage_name: str | None = None,
+):
     """Indirection point so tests can patch this without monkeypatching the SDK.
 
     Creates the client internally so patching this single function is enough
@@ -50,6 +57,9 @@ def _call_haiku(*, messages: list[dict]):
         max_tokens=2048,
         system=_SYSTEM_PROMPT,
         messages=messages,
+        session_id=session_id,
+        stage_name=stage_name,
+        purpose=AgentPurpose.NEWS_FILTER,
     )
 
 
@@ -72,11 +82,15 @@ def curate_signals(
     signals: list[dict],
     target_n: int,
     regime_context: str,
+    *,
+    session_id: int | None = None,
+    stage_name: str = "ideation",
 ) -> list[int]:
     """Return IDs of the top-N most relevant signals.
 
     Falls back to all input IDs on any error. Empty input returns
-    empty list without calling the API.
+    empty list without calling the API. `session_id`/`stage_name` tag
+    the Haiku call's `agent_call` telemetry event.
     """
     if not signals:
         return []
@@ -89,6 +103,8 @@ def curate_signals(
     try:
         response = _call_haiku(
             messages=[{"role": "user", "content": user_message}],
+            session_id=session_id,
+            stage_name=stage_name,
         )
     except (anthropic.APIError, anthropic.APIConnectionError, RuntimeError, ValueError) as e:
         logger.warning("Haiku news filter call failed (%s); falling back to firehose", e)

@@ -46,6 +46,7 @@ class AgentPurpose:
     CLASSIFIER_RELEVANCE = "classifier_relevance"
     STRATEGIST_LOOP = "strategist_loop"
     REFLECTION_LOOP = "reflection_loop"
+    NEWS_FILTER = "news_filter"
 
 
 _CONTEXT_LOGGED_PURPOSES = frozenset({

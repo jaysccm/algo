@@ -260,7 +260,7 @@ def _build_classification_result(
 
 def classify_news(
     headline: str, published_at: datetime, client=None, alpaca_id: str | None = None,
-    *, session_id: int | None = None,
+    *, session_id: int | None = None, summary: str = "",
 ) -> ClassificationResult:
     """
     Classify a single news headline using Claude Haiku.
@@ -270,6 +270,7 @@ def classify_news(
         published_at: When the news was published
         client: Optional Anthropic client (reused across calls)
         alpaca_id: Source Alpaca news id for canonical dedup (P2.16)
+        summary: Alpaca article summary, threaded into TickerSignal.summary
 
     Returns:
         ClassificationResult with type and extracted signals
@@ -298,7 +299,26 @@ def classify_news(
             macro_signal=None
         )
 
-    return _build_classification_result(result, headline, published_at, alpaca_id)
+    return _build_classification_result(result, headline, published_at, alpaca_id, summary)
+
+
+# API status codes that fail identically on every call: bad request, auth,
+# billing, permission. Retrying per headline cannot help, it only multiplies
+# the doomed requests by the batch size.
+_NON_RETRYABLE_STATUS = frozenset({400, 401, 402, 403})
+# A 400 that aborts the rest of the run as well: nothing later in the same
+# session can succeed when the account cannot pay for requests.
+_ACCOUNT_ERROR_MARKERS = ("credit balance",)
+
+
+def _aborts_remaining_batches(exc) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status in (401, 402, 403):
+        return True
+    if status == 400:
+        msg = str(exc).lower()
+        return any(marker in msg for marker in _ACCOUNT_ERROR_MARKERS)
+    return False
 
 
 def classify_news_batch(
@@ -335,11 +355,23 @@ def classify_news_batch(
 
     import anthropic as _anthropic
 
+    def _noise_batch(n: int) -> None:
+        for _ in range(n):
+            results.append(ClassificationResult(
+                news_type="noise", ticker_signals=[], macro_signal=None
+            ))
+
+    abort_reason: str | None = None
+
     for start in range(0, len(headlines), batch_size):
         batch_headlines = headlines[start:start + batch_size]
         batch_dates = published_ats[start:start + batch_size]
         batch_ids = alpaca_ids[start:start + batch_size]
         batch_summaries = summaries[start:start + batch_size]
+
+        if abort_reason is not None:
+            _noise_batch(len(batch_headlines))
+            continue
 
         try:
             batch_results = _classify_batch(batch_headlines, batch_dates, batch_ids, batch_summaries, session_id=session_id)
@@ -348,19 +380,38 @@ def classify_news_batch(
             # P2.20: don't fan out N per-call retries on rate limit — the batch
             # already retried 3 times. Fanning out would hammer the same minute.
             logger.error("Batch classification rate-limited beyond retries (%s) — marking batch as noise", e)
-            for _ in batch_headlines:
-                results.append(ClassificationResult(
-                    news_type="noise", ticker_signals=[], macro_signal=None
-                ))
+            _noise_batch(len(batch_headlines))
+        except _anthropic.APIError as e:
+            # Any other API failure has already been retried where retrying
+            # helps (5xx, connection errors) or cannot help at all (4xx).
+            # Per-headline fallback would repeat the same failure batch_size
+            # times: session 572 (2026-10-07) turned 6 failed batches into
+            # 306 failed calls on a "credit balance is too low" 400.
+            status = getattr(e, "status_code", None)
+            if _aborts_remaining_batches(e):
+                abort_reason = f"HTTP {status}: {e}"
+                logger.error(
+                    "Batch classification failed with an account/auth error (%s) — "
+                    "marking this and all remaining batches as noise", abort_reason,
+                )
+            elif status in _NON_RETRYABLE_STATUS:
+                logger.error("Batch classification rejected (HTTP %s: %s) — marking batch as noise", status, e)
+            else:
+                logger.error("Batch classification failed after retries (%s) — marking batch as noise", e)
+            _noise_batch(len(batch_headlines))
         except Exception as e:
+            # Response-shape problems (invalid JSON, not an array, unexpected
+            # content): the model answered, so asking per headline can work.
             logger.warning("Batch classification failed (%s), falling back to individual", e)
-            for headline, pub_date, aid in zip(batch_headlines, batch_dates, batch_ids, strict=True):
+            for headline, pub_date, aid, summary in zip(
+                batch_headlines, batch_dates, batch_ids, batch_summaries, strict=True,
+            ):
                 try:
-                    results.append(classify_news(headline, pub_date, alpaca_id=aid, session_id=session_id))
-                except Exception:
-                    results.append(ClassificationResult(
-                        news_type="noise", ticker_signals=[], macro_signal=None
+                    results.append(classify_news(
+                        headline, pub_date, alpaca_id=aid, session_id=session_id, summary=summary,
                     ))
+                except Exception:
+                    _noise_batch(1)
 
     return results
 

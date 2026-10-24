@@ -1370,7 +1370,9 @@ class TestToolGetCuratedNews:
         for i in [1, 2, 3]:
             assert f"[#{i}]" in out
 
-    def test_drops_null_summary_rows(self, monkeypatch):
+    def test_keeps_rows_without_summary(self, monkeypatch):
+        """Benzinga items have no summary; excluding them hid most analyst
+        news from the strategist (JAY-167)."""
         from v2 import tools
 
         rows = [
@@ -1390,12 +1392,21 @@ class TestToolGetCuratedNews:
         monkeypatch.setattr(tools, "curate_signals", fake_curate)
         tools.reset_session()
 
-        # Force the filter path by setting target_n below the post-NULL-filter count.
         tools.tool_get_curated_news(target_n=1)
 
-        assert captured["signal_ids"] == [1, 4], (
-            f"NULL/empty summaries must be dropped before filter; got {captured['signal_ids']}"
-        )
+        assert captured["signal_ids"] == [1, 2, 3, 4]
+
+    def test_all_rows_without_summary_are_served(self, monkeypatch):
+        from v2 import tools
+
+        rows = [self._row(i, summary=None) for i in [1, 2]]
+        monkeypatch.setattr(tools, "get_news_signals", lambda **kw: rows)
+        monkeypatch.setattr(tools, "get_macro_context", lambda days: "x")
+        tools.reset_session()
+
+        out = tools.tool_get_curated_news(target_n=10)
+
+        assert "[#1]" in out and "[#2]" in out
 
     def test_caches_within_session(self, monkeypatch):
         from v2 import tools

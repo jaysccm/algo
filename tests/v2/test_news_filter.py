@@ -148,3 +148,16 @@ class TestNewsFilterTelemetry:
         kwargs = mock_call.call_args.kwargs
         assert kwargs["session_id"] == 9
         assert kwargs["stage_name"] == "ideation"
+
+
+class TestBuildUserMessage:
+    def test_omits_summary_line_when_empty(self):
+        from v2.news_filter import _build_user_message
+
+        msg = _build_user_message(
+            [_signal(1, summary="has one"), _signal(2, summary=""), _signal(3, summary=None)],
+            target_n=2, regime_context="x",
+        )
+
+        assert msg.count("summary:") == 1
+        assert "[#2]" in msg and "[#3]" in msg

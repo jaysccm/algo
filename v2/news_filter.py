@@ -33,7 +33,8 @@ You receive:
 
 You return a JSON object: {"top_ids": [<int>, <int>, ...]} listing the IDs of the
 top-N most relevant signals for the strategist to consider today, in order of
-relevance. Optimize for: news-worthiness (real catalysts vs. noise), regime-fit
+relevance. Some signals have no summary line; rank those on the headline alone,
+on the same footing as the rest. Optimize for: news-worthiness (real catalysts vs. noise), regime-fit
 (consistent with today's backdrop), and de-duplication (one slot per distinct
 story, not multiple variants of the same event).
 
@@ -71,10 +72,14 @@ def _build_user_message(signals: list[dict], target_n: int, regime_context: str)
         "signals:",
     ]
     for s in signals:
-        lines.append(
+        line = (
             f"[#{s['id']}] {s.get('ticker','?')} {s.get('category','?')}/{s.get('sentiment','?')}: "
-            f"{s.get('headline','')}\n  summary: {s.get('summary','')}"
+            f"{s.get('headline','')}"
         )
+        summary = s.get("summary")
+        if summary:
+            line += f"\n  summary: {summary}"
+        lines.append(line)
     return "\n".join(lines)
 
 

@@ -359,8 +359,10 @@ def tool_get_curated_news(
     logger.info("Getting curated news (ticker=%s, days=%d, target_n=%d)", ticker, days, target_n)
     rows = get_news_signals(ticker=ticker, days=days)
 
-    # Drop rows without usable summaries — pre-backfill safety + empty-summary cleanup.
-    candidates = [r for r in rows if r.get("summary")]
+    # Rows without a summary stay in: Benzinga items never carry one (687 of
+    # 687 in a live probe), and they are most of the analyst category. The
+    # filter ranks them on the headline alone (JAY-167).
+    candidates = rows
 
     if not candidates:
         if ticker:

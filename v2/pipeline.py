@@ -59,6 +59,13 @@ def run_pipeline(
             continue
 
         for signal in result.ticker_signals:
+            # A ticker_specific headline the classifier files under category
+            # "noise" is "not directly relevant to stock price" by definition.
+            # Storing it showed it to the strategist and executor and counted
+            # it in sentiment tallies (10.6% of paper rows in 30 days; JAY-171).
+            if signal.category == "noise":
+                stats.noise_dropped += 1
+                continue
             ticker_signals_batch.append((
                 signal.ticker, signal.headline, signal.category,
                 signal.sentiment, signal.confidence, signal.published_at,

@@ -371,19 +371,24 @@ tasks:
     cmds:
       - |
         set -eu
-        umask 077
+        # Archives are private by construction: go-task's embedded shell has no
+        # umask builtin (every scheduled backup on bee failed with
+        # "umask: unimplemented builtin" from 2026-10-07 until this change), so
+        # the directory and files get their modes set explicitly instead.
         mkdir -p backups
+        chmod 700 backups
         f="backups/{{.INSTANCE}}-$(date +%Y%m%d-%H%M%S).dump"
         tmp="$f.partial"
         copy_tmp=""
         trap 'rm -f "$tmp"; if [ -n "$copy_tmp" ]; then rm -f "$copy_tmp"; fi' EXIT
+        install -m 600 /dev/null "$tmp"
         {{.COMPOSE}} exec -T db pg_dump -U algo -d trading -Fc > "$tmp"
         {{.COMPOSE}} exec -T db pg_restore -l < "$tmp" > /dev/null
         mv "$tmp" "$f"
         if [ -n "${ALGO_BACKUP_COPY_DIR:-}" ]; then
           mkdir -p "$ALGO_BACKUP_COPY_DIR"
           copy_tmp="$ALGO_BACKUP_COPY_DIR/$(basename "$f").partial"
-          cp "$f" "$copy_tmp"
+          install -m 600 "$f" "$copy_tmp"
           cmp -s "$f" "$copy_tmp"
           mv "$copy_tmp" "$ALGO_BACKUP_COPY_DIR/$(basename "$f")"
           echo "==> copied to $ALGO_BACKUP_COPY_DIR"

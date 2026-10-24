@@ -12,7 +12,7 @@ clamped, feasible share count.
 from dataclasses import dataclass
 from decimal import Decimal
 
-from .risk import MAX_POSITION_PCT
+from .risk import MAX_POSITION_PCT, MIN_BUY_PCT
 
 SELL_INTENT_TYPES = frozenset({
     "exit_full",
@@ -108,8 +108,15 @@ def resolve_buy_intent(
     price: Decimal,
     portfolio_value: Decimal,
     buying_power: Decimal,
+    min_buy_pct: Decimal | None = None,
 ) -> Decimal:
-    """Resolve a buy intent to shares. Clamped to buying_power and MAX_POSITION_PCT."""
+    """Resolve a buy intent to shares.
+
+    Raised to the MIN_BUY_PCT floor, then clamped to buying_power and
+    MAX_POSITION_PCT — the caps always win over the floor.
+    """
+    if min_buy_pct is None:
+        min_buy_pct = MIN_BUY_PCT
     if price <= 0:
         raise IntentError("price must be positive")
     if buying_power <= 0:
@@ -134,6 +141,10 @@ def resolve_buy_intent(
         desired = target_value - current_value
     else:
         raise IntentError(f"unknown buy intent: {t}")
+
+    # Raise to the operator floor (a target already met stays a no-op above)
+    if min_buy_pct > 0 and portfolio_value > 0:
+        desired = max(desired, portfolio_value * (min_buy_pct / Decimal("100")))
 
     # Clamp to buying_power
     desired = min(desired, buying_power)

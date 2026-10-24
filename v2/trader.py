@@ -54,6 +54,7 @@ from .intents import (
 )
 from .risk import (
     MAX_SECTOR_PCT,
+    MIN_BUY_PCT,
     SECTOR_MAP,
     check_churn_gate,
     check_daily_loss_limit,
@@ -183,13 +184,20 @@ def _build_executor_context(account_info: dict, data_client, errors: list[str]) 
         price = get_latest_trade_price(p["ticker"], client=data_client)
         if price:
             position_values[p["ticker"]] = p["shares"] * price
-    sector_warnings = check_sector_concentration(position_values, account_info["portfolio_value"])
-    if sector_warnings:
-        logger.warning("Sector concentration warnings: %s", sector_warnings)
+    notes = check_sector_concentration(position_values, account_info["portfolio_value"])
+    if notes:
+        logger.warning("Sector concentration warnings: %s", notes)
+    if MIN_BUY_PCT > 0:
+        notes.append(
+            f"Operator sizing floor: buys below {MIN_BUY_PCT}% of portfolio value are "
+            "raised to it. Formation-mode dollar/share bands in strategy rules are "
+            "superseded; size buys at or above the floor."
+        )
+    if notes:
         if executor_input.risk_notes:
-            executor_input.risk_notes += "\n" + "\n".join(sector_warnings)
+            executor_input.risk_notes += "\n" + "\n".join(notes)
         else:
-            executor_input.risk_notes = "\n".join(sector_warnings)
+            executor_input.risk_notes = "\n".join(notes)
 
     return executor_input
 

@@ -12,6 +12,7 @@ from .database.trading_db import (
     get_positions,
     get_recent_decisions,
 )
+from .risk import MIN_BUY_PCT
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,27 @@ def build_formation_context(orphans: list[dict] | None = None) -> str:
     if orphans is None:
         orphans = get_orphan_positions()
 
-    if not in_formation and not orphans:
+    sizing_floor = not in_formation and MIN_BUY_PCT > 0
+
+    if not in_formation and not orphans and not sizing_floor:
         return ""
 
     parts = []
+
+    if sizing_floor:
+        parts.append(f"""## FORMATION MODE COMPLETE — OPERATOR SIZING FLOOR
+
+Formation mode has ended: at least {FORMATION_TRADE_THRESHOLD} trades have \
+completed their 7-day outcome measurement. The 1-5 share / $200-$500 sizing \
+band was a formation-only instruction and no longer applies.
+
+The operator has set a minimum buy size of {MIN_BUY_PCT}% of portfolio value. \
+The system raises any smaller buy to this floor (still capped by buying_power \
+and the per-position limit), so size every buy at or above it. Any strategy \
+rule or identity text that keeps formation-mode sizing in force, calls \
+formation mode permanent, or waits on a supervisor upgrade contradicts \
+system state — the supervisor is observer-only and cannot upgrade anything. \
+Amend or retire such rules rather than following them.""")
 
     if in_formation:
         parts.append(f"""## FORMATION MODE ACTIVE

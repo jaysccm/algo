@@ -1,5 +1,6 @@
 """Tests for v2/formation.py - cold-start detection and formation context."""
 
+from decimal import Decimal
 from unittest.mock import patch
 
 from v2.formation import build_formation_context, get_orphan_positions, is_formation_mode
@@ -149,3 +150,23 @@ class TestBuildFormationContext:
         ctx = build_formation_context()
         assert "AAPL" in ctx
         assert "FORMATION MODE" not in ctx
+
+    @patch("v2.formation.MIN_BUY_PCT", Decimal("2"))
+    @patch("v2.formation.get_orphan_positions")
+    @patch("v2.formation.is_formation_mode")
+    def test_sizing_floor_announces_formation_complete(self, mock_formation, mock_orphans):
+        mock_formation.return_value = False
+        mock_orphans.return_value = []
+        ctx = build_formation_context()
+        assert "FORMATION MODE COMPLETE" in ctx
+        assert "2%" in ctx
+
+    @patch("v2.formation.MIN_BUY_PCT", Decimal("2"))
+    @patch("v2.formation.get_orphan_positions")
+    @patch("v2.formation.is_formation_mode")
+    def test_sizing_floor_not_announced_during_formation(self, mock_formation, mock_orphans):
+        mock_formation.return_value = True
+        mock_orphans.return_value = []
+        ctx = build_formation_context()
+        assert "FORMATION MODE ACTIVE" in ctx
+        assert "FORMATION MODE COMPLETE" not in ctx

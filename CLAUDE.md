@@ -244,6 +244,7 @@ Optional in-container knobs (read at module import — container restart require
 - `ALGO_EXECUTOR_MODEL` — overrides the executor model. Defaults to `claude-haiku-4-5-20251001`. Set it in one instance's env file to flip that instance's executor independently of the others (e.g. `claude-sonnet-4-6` for the Sonnet pilot on `paper`).
 - `ALGO_EXECUTOR_MAX_TOKENS` — overrides the executor `max_tokens` cap. Defaults to `8192` (Haiku 4.5's model max). Raise this knob if executor responses are being truncated.
 - `ALGO_DAILY_LOSS_LIMIT_PCT` — daily-loss circuit breaker (default `3.0`). Halts the trading stage when account equity is down more than this % vs the previous close (Alpaca `last_equity`); re-checked after every fill. `<= 0` disables.
+- `ALGO_MIN_BUY_PCT` — operator sizing floor, % of portfolio value (default `0`, disabled). Buy intents resolving below it are raised to it, still clamped by buying_power and `MAX_POSITION_PCT` (10%). Once formation mode has ended, the strategist, executor and reflection prompts are told the floor supersedes formation-era sizing rules. Exists because the formation prompt's $200–$500 band was frozen into a self-authored "permanent" rule (paper Rule #1) that kept the book ~92% cash.
 - `ALGO_LOOP_COST_CEILING_USD` — per-agentic-loop cost ceiling (default `30`). The strategist/reflection/supervisor loops abort with `stop_reason="cost_ceiling"` once cumulative token cost (priced via `model_pricing`) crosses the cap. `<= 0` disables.
 
 **Host-side** variables in `.env.host` (gitignored; copy `.env.host.example`).

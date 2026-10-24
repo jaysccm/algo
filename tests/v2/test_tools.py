@@ -1753,3 +1753,41 @@ def test_get_session_summary_window_aggregates(mock_db, mock_cursor):
     args, _ = mock_cursor.execute.call_args
     assert "session_costs" in args[0]
     assert args[1] == (14,)
+
+
+class TestUnresolvableTickerOnReadTools:
+    """An unresolvable ticker used to silently become the all-ticker query."""
+
+    def test_news_signals_rejects_bad_ticker(self, monkeypatch):
+        from v2 import tools
+
+        called = []
+        monkeypatch.setattr(tools, "get_news_signals", lambda **kw: called.append(kw) or [])
+
+        out = tools.tool_get_news_signals(ticker="FAANG")
+
+        assert out.startswith("Error:") and "FAANG" in out
+        assert called == [], "must not query the database unfiltered"
+
+    def test_curated_news_rejects_bad_ticker(self, monkeypatch):
+        from v2 import tools
+
+        called = []
+        monkeypatch.setattr(tools, "get_news_signals", lambda **kw: called.append(kw) or [])
+        tools.reset_session()
+
+        out = tools.tool_get_curated_news(ticker="not a ticker!")
+
+        assert out.startswith("Error:")
+        assert called == []
+
+    def test_blank_or_missing_ticker_still_means_no_filter(self, monkeypatch):
+        from v2 import tools
+
+        called = []
+        monkeypatch.setattr(tools, "get_news_signals", lambda **kw: called.append(kw) or [])
+
+        for raw in (None, "", "  "):
+            out = tools.tool_get_news_signals(ticker=raw)
+            assert out.startswith("No news signals")
+        assert [c["ticker"] for c in called] == [None, None, None]

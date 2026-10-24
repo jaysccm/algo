@@ -1120,3 +1120,66 @@ class TestClassifierTelemetryWiring:
         assert captured["session_id"] == 42
         assert captured["stage_name"] == "pipeline"
         assert captured["purpose"] == "classifier_relevance"
+
+
+class TestFieldCoercion:
+    """Out-of-vocabulary LLM values must not reach the DB (JAY-169)."""
+
+    def _entry(self, **kw):
+        base = {"type": "ticker_specific", "tickers": ["AAPL"], "category": "earnings",
+                "sentiment": "bullish", "confidence": "high"}
+        base.update(kw)
+        return base
+
+    def test_long_sentiment_is_coerced_not_stored(self):
+        from v2.classifier import _build_classification_result
+        r = _build_classification_result(self._entry(sentiment="very bullish"), "h", SAMPLE_PUBLISHED_AT)
+        assert r.ticker_signals[0].sentiment == "neutral"
+
+    def test_short_off_vocabulary_values_are_coerced(self):
+        from v2.classifier import _build_classification_result
+        r = _build_classification_result(
+            self._entry(sentiment="mixed", confidence="strong"), "h", SAMPLE_PUBLISHED_AT)
+        assert r.ticker_signals[0].sentiment == "neutral"
+        assert r.ticker_signals[0].confidence == "low"
+
+    def test_valid_values_pass_and_are_normalised(self):
+        from v2.classifier import _build_classification_result
+        r = _build_classification_result(
+            self._entry(sentiment=" Bearish ", confidence="MEDIUM"), "h", SAMPLE_PUBLISHED_AT)
+        assert r.ticker_signals[0].sentiment == "bearish"
+        assert r.ticker_signals[0].confidence == "medium"
+
+    def test_missing_and_non_string_values_use_defaults(self):
+        from v2.classifier import _build_classification_result
+        r = _build_classification_result(
+            {"type": "ticker_specific", "tickers": ["AAPL"], "category": "earnings",
+             "sentiment": None, "confidence": 7}, "h", SAMPLE_PUBLISHED_AT)
+        assert (r.ticker_signals[0].sentiment, r.ticker_signals[0].confidence) == ("neutral", "low")
+
+    def test_macro_sectors_filtered_to_documented_list(self):
+        from v2.classifier import _build_classification_result
+        r = _build_classification_result(
+            {"type": "macro_political", "category": "fed", "sentiment": "mixed",
+             "affected_sectors": ["Tech", "aerospace", "tech", None, "finance"]},
+            "h", SAMPLE_PUBLISHED_AT)
+        assert r.macro_signal.affected_sectors == ["tech", "finance"]
+        assert r.macro_signal.sentiment == "neutral"
+
+    def test_empty_or_invalid_sectors_default_to_all(self):
+        from v2.classifier import _build_classification_result
+        for bad in ([], ["media"], "nonsense", 5, None):
+            r = _build_classification_result(
+                {"type": "sector", "affected_sectors": bad}, "h", SAMPLE_PUBLISHED_AT)
+            assert r.macro_signal.affected_sectors == ["all"], bad
+
+    def test_single_ticker_path_coerces(self):
+        from unittest.mock import patch as _patch
+
+        from v2.classifier import classify_ticker_news
+        resp = _make_mock_response(json.dumps(
+            {"category": "earnings", "sentiment": "very bullish", "confidence": "certain"}))
+        with _patch("v2.classifier.get_claude_client") as g:
+            g.return_value.messages.stream.return_value = resp
+            sig = classify_ticker_news("AAPL", "h", SAMPLE_PUBLISHED_AT)
+        assert (sig.sentiment, sig.confidence) == ("neutral", "low")

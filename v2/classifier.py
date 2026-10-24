@@ -24,6 +24,53 @@ VALID_MACRO_CATEGORIES = frozenset({
 })
 
 
+VALID_SENTIMENTS = frozenset({"bullish", "bearish", "neutral"})
+VALID_CONFIDENCES = frozenset({"high", "medium", "low"})
+VALID_SECTORS = frozenset({
+    "tech", "finance", "energy", "healthcare", "defense", "consumer", "industrial", "all",
+})
+
+
+def _coerce_sentiment(value) -> str:
+    """Return a sentiment from the documented set, else "neutral".
+
+    news_signals.sentiment is VARCHAR(10): one value such as "very bullish"
+    aborts the whole batch insert, and short off-vocabulary values ("mixed")
+    pollute the sentiment tallies downstream (JAY-169).
+    """
+    if isinstance(value, str) and value.strip().lower() in VALID_SENTIMENTS:
+        return value.strip().lower()
+    if value not in (None, ""):
+        logger.warning("classifier: coercing sentiment %r to 'neutral'", value)
+    return "neutral"
+
+
+def _coerce_confidence(value) -> str:
+    """Return a confidence from the documented set, else "low"."""
+    if isinstance(value, str) and value.strip().lower() in VALID_CONFIDENCES:
+        return value.strip().lower()
+    if value not in (None, ""):
+        logger.warning("classifier: coercing confidence %r to 'low'", value)
+    return "low"
+
+
+def _coerce_sectors(value) -> list[str]:
+    """Keep only documented sectors; an empty or invalid result means ["all"]."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return ["all"]
+    kept = []
+    for item in value:
+        if isinstance(item, str) and item.strip().lower() in VALID_SECTORS:
+            sector = item.strip().lower()
+            if sector not in kept:
+                kept.append(sector)
+        elif item not in (None, ""):
+            logger.warning("classifier: dropping undocumented sector %r", item)
+    return kept or ["all"]
+
+
 def _validate_category(value: str, allowed: frozenset, context: str) -> str | None:
     """Return `value` if it's in the allowed enum, else None and log.
 
@@ -222,8 +269,8 @@ def _build_classification_result(
                     ticker=cleaned,
                     headline=headline,
                     category=category,
-                    sentiment=entry.get("sentiment", "neutral"),
-                    confidence=entry.get("confidence", "low"),
+                    sentiment=_coerce_sentiment(entry.get("sentiment")),
+                    confidence=_coerce_confidence(entry.get("confidence")),
                     published_at=published_at,
                     alpaca_id=alpaca_id,
                     summary=summary,
@@ -236,8 +283,8 @@ def _build_classification_result(
             macro_signal = MacroSignal(
                 headline=headline,
                 category=category,
-                affected_sectors=entry.get("affected_sectors", ["all"]),
-                sentiment=entry.get("sentiment", "neutral"),
+                affected_sectors=_coerce_sectors(entry.get("affected_sectors")),
+                sentiment=_coerce_sentiment(entry.get("sentiment")),
                 published_at=published_at,
                 alpaca_id=alpaca_id,
             )
@@ -245,8 +292,8 @@ def _build_classification_result(
         macro_signal = MacroSignal(
             headline=headline,
             category="sector",
-            affected_sectors=entry.get("affected_sectors", ["all"]),
-            sentiment=entry.get("sentiment", "neutral"),
+            affected_sectors=_coerce_sectors(entry.get("affected_sectors")),
+            sentiment=_coerce_sentiment(entry.get("sentiment")),
             published_at=published_at,
             alpaca_id=alpaca_id,
         )
@@ -475,7 +522,7 @@ def classify_ticker_news(
         category=_validate_category(
             result.get("category", ""), VALID_TICKER_CATEGORIES, "ticker",
         ) or "noise",
-        sentiment=result.get("sentiment", "neutral"),
-        confidence=result.get("confidence", "low"),
+        sentiment=_coerce_sentiment(result.get("sentiment")),
+        confidence=_coerce_confidence(result.get("confidence")),
         published_at=published_at
     )

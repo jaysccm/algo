@@ -84,8 +84,21 @@ jobs:
 
   release-rehearsal:
     needs: test
-    uses: jaysccm/actions/.github/workflows/release.yml@c2ef1df62f2d435d901eb8b810bbf7d380131706
+    if: github.event_name == 'pull_request'
+    uses: jaysccm/actions/.github/workflows/release.yml@0a5b00b7bf58fe3ba0ae82d5ed27f94afe36ace9
     with:
       project: algo
       deploy: false
+      test-command: docker run --rm --network none "$IMAGE" python -m compileall -q v2 trading dashboard
+
+  # Build/test on GitHub, then download the identical tested image on bee, whose
+  # ~/services/deploy.sh runs the guarded updater (HALT and timer state preserved).
+  # Pin the shared workflow so a shared-repository merge cannot change our release path.
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: jaysccm/actions/.github/workflows/release.yml@0a5b00b7bf58fe3ba0ae82d5ed27f94afe36ace9
+    with:
+      project: algo
+      deploy-host: bee
       test-command: docker run --rm --network none "$IMAGE" python -m compileall -q v2 trading dashboard

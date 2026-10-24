@@ -1325,6 +1325,26 @@ def close_orphan_running_stages(session_id: int, reason: str = "session ended wi
         return [row["stage_name"] for row in cur.fetchall()]
 
 
+def get_last_completed_stage_started_at(stage_name: str):
+    """When the most recent successfully completed run of `stage_name`
+    *started* (aware datetime), or None if it has never completed.
+
+    The news pipeline uses this to size its lookback window: fetching
+    from the previous run's start (plus overlap) instead of a fixed 24h
+    covers weekends and missed days, which a weekday-only schedule with a
+    24h window never saw.
+    """
+    with get_cursor() as cur:
+        cur.execute("""
+            SELECT started_at FROM session_stages
+            WHERE stage_name = %s AND status = 'completed' AND started_at IS NOT NULL
+            ORDER BY started_at DESC
+            LIMIT 1
+        """, (stage_name,))
+        row = cur.fetchone()
+        return row["started_at"] if row else None
+
+
 def get_completed_stages(session_id: int) -> set[str]:
     with get_cursor() as cur:
         cur.execute("""

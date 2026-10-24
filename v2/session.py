@@ -14,11 +14,12 @@ subsequent stages from running.
 
 import argparse
 import logging
+import math
 import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from . import otel
@@ -35,6 +36,7 @@ from .database.trading_db import (
     fail_session,
     fail_session_stage,
     get_current_strategy_state,
+    get_last_completed_stage_started_at,
     get_playbook,
     get_session_for_date,
     insert_session_record,
@@ -311,19 +313,63 @@ def _run_supervisor_stage(
         )
 
 
+# News lookback window when --pipeline-hours is not given. The window is
+# sized from the previous successfully completed pipeline run so that
+# nothing published between two runs is skipped: with a weekday-only
+# schedule, a fixed 24h window never saw Friday-afternoon-to-Sunday news
+# (60 days of data on paper held zero weekend articles). Floor 24h keeps
+# the previous behaviour as a minimum; ceiling 7 days matches the
+# strategist's own lookback (nothing older is read by anyone); the overlap
+# absorbs clock skew and Alpaca updates to already-seen items (dedup on
+# alpaca_id makes overlap free).
+PIPELINE_MIN_HOURS = 24
+PIPELINE_MAX_HOURS = 168
+PIPELINE_OVERLAP_HOURS = 1
+
+
+def _resolve_pipeline_hours(session_id: int | None, explicit: int | None, now: datetime | None = None) -> int:
+    """Hours of news to fetch: the explicit operator value, else the gap
+    since the last completed pipeline run (plus overlap), clamped to
+    [PIPELINE_MIN_HOURS, PIPELINE_MAX_HOURS]. Falls back to the floor when
+    there is no session (tests, ad-hoc runs) or no prior run."""
+    if explicit is not None:
+        return explicit
+    if session_id is None:
+        return PIPELINE_MIN_HOURS
+    try:
+        last_started = get_last_completed_stage_started_at("pipeline")
+    except Exception as e:
+        logger.warning("pipeline: could not read last run time (%s); using %dh", e, PIPELINE_MIN_HOURS)
+        return PIPELINE_MIN_HOURS
+    if last_started is None:
+        return PIPELINE_MIN_HOURS
+    if last_started.tzinfo is None:
+        last_started = last_started.replace(tzinfo=UTC)
+    now = now or datetime.now(UTC)
+    elapsed_hours = (now - last_started).total_seconds() / 3600
+    hours = math.ceil(elapsed_hours) + PIPELINE_OVERLAP_HOURS
+    resolved = max(PIPELINE_MIN_HOURS, min(PIPELINE_MAX_HOURS, hours))
+    if hours > PIPELINE_MAX_HOURS:
+        logger.warning("pipeline: last completed run was %.0fh ago; window clamped to %dh",
+                       elapsed_hours, PIPELINE_MAX_HOURS)
+    return resolved
+
+
 def _run_pipeline_stage(
     result: SessionResult,
     session_id: int | None,
     completed_stages: set,
     skip: bool,
-    pipeline_hours: int,
-    pipeline_limit: int,
+    pipeline_hours: int | None,
+    pipeline_limit: int | None,
 ) -> None:
     if skip or "pipeline" in completed_stages:
         logger.info("[Stage 1] News pipeline — SKIPPED%s",
                     " (completed in prior run)" if "pipeline" in completed_stages else "")
         return
-    logger.info("[Stage 1] Running news pipeline")
+    pipeline_hours = _resolve_pipeline_hours(session_id, pipeline_hours)
+    logger.info("[Stage 1] Running news pipeline (window=%dh, limit=%s)",
+                pipeline_hours, "none" if pipeline_limit is None else pipeline_limit)
     _start_stage(session_id, "pipeline")
     with capture_usage() as usage:
         try:
@@ -582,8 +628,8 @@ def run_session(
     skip_executor: bool = False,
     skip_strategy: bool = False,
     skip_dashboard: bool = False,
-    pipeline_hours: int = 24,
-    pipeline_limit: int = 300,
+    pipeline_hours: int | None = None,
+    pipeline_limit: int | None = None,
     force: bool = False,
 ) -> SessionResult:
     start = time.monotonic()
@@ -685,7 +731,10 @@ def main():
     parser.add_argument("--skip-executor", action="store_true")
     parser.add_argument("--skip-strategy", action="store_true")
     parser.add_argument("--skip-dashboard", action="store_true")
-    parser.add_argument("--pipeline-hours", type=int, default=24)
+    parser.add_argument("--pipeline-hours", type=int, default=None,
+                        help="Hours of news to fetch (default: since the last completed pipeline run, 24h–7d)")
+    parser.add_argument("--pipeline-limit", type=int, default=None,
+                        help="Keep only the newest N news items (default: the whole window)")
     parser.add_argument("--force", action="store_true", help="Override session idempotency check")
 
     args = parser.parse_args()
@@ -697,6 +746,7 @@ def main():
         skip_strategy=args.skip_strategy,
         skip_dashboard=args.skip_dashboard,
         pipeline_hours=args.pipeline_hours,
+        pipeline_limit=args.pipeline_limit,
         force=args.force,
     )
     if result.idempotent_skip:

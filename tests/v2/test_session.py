@@ -1,5 +1,5 @@
 """Tests for 5-stage session orchestrator."""
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -1763,3 +1763,85 @@ class TestDashboardPublishGate:
             result = run_session(dry_run=False, skip_dashboard=True)
         mock_dashboard.assert_not_called()
         assert result.skipped_dashboard is True
+
+
+class TestResolvePipelineHours:
+    """The news lookback is sized from the previous completed pipeline run
+    so weekends and missed days are covered; --pipeline-hours still wins."""
+
+    NOW = datetime(2026, 10, 26, 18, 30, tzinfo=UTC)  # a Monday session start
+
+    def _resolve(self, last_started, explicit=None, session_id=7):
+        from v2.session import _resolve_pipeline_hours
+        with patch("v2.session.get_last_completed_stage_started_at", return_value=last_started) as m:
+            hours = _resolve_pipeline_hours(session_id, explicit, now=self.NOW)
+        return hours, m
+
+    def test_explicit_value_wins_without_db_lookup(self):
+        hours, m = self._resolve(last_started=self.NOW - timedelta(hours=100), explicit=6)
+        assert hours == 6
+        m.assert_not_called()
+
+    def test_no_session_uses_floor_without_db_lookup(self):
+        hours, m = self._resolve(last_started=None, session_id=None)
+        assert hours == 24
+        m.assert_not_called()
+
+    def test_no_prior_run_uses_floor(self):
+        hours, _ = self._resolve(last_started=None)
+        assert hours == 24
+
+    def test_recent_run_is_floored_at_24h(self):
+        hours, _ = self._resolve(last_started=self.NOW - timedelta(hours=20))
+        assert hours == 24
+
+    def test_weekend_gap_is_covered_with_overlap(self):
+        """Friday 12:30 -> Monday 12:30 is 72h; plus 1h overlap."""
+        hours, _ = self._resolve(last_started=self.NOW - timedelta(hours=72))
+        assert hours == 73
+
+    def test_fractional_gap_rounds_up(self):
+        hours, _ = self._resolve(last_started=self.NOW - timedelta(hours=71, minutes=30))
+        assert hours == 73
+
+    def test_long_outage_is_clamped_to_seven_days(self):
+        hours, _ = self._resolve(last_started=self.NOW - timedelta(days=30))
+        assert hours == 168
+
+    def test_naive_timestamp_is_treated_as_utc(self):
+        naive = (self.NOW - timedelta(hours=48)).replace(tzinfo=None)
+        hours, _ = self._resolve(last_started=naive)
+        assert hours == 49
+
+    def test_db_error_falls_back_to_floor(self):
+        from v2.session import _resolve_pipeline_hours
+        with patch("v2.session.get_last_completed_stage_started_at", side_effect=RuntimeError("db down")):
+            assert _resolve_pipeline_hours(7, None, now=self.NOW) == 24
+
+    def test_run_session_passes_resolved_window_and_no_limit(self):
+        """Session default: resolved window, whole window (limit=None)."""
+        with patch("v2.session.run_backfill"), \
+             patch("v2.session.compute_signal_attribution", return_value=[]), \
+             patch("v2.session.build_attribution_constraints", return_value=""), \
+             patch("v2.session._resolve_pipeline_hours", return_value=73) as mock_resolve, \
+             patch("v2.session.run_pipeline") as mock_pipeline, \
+             patch("v2.session.run_strategist_loop"), \
+             patch("v2.session.run_trading_session"):
+            run_session(dry_run=False)
+
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.args[1] is None  # no explicit --pipeline-hours
+        assert mock_pipeline.call_args.kwargs["hours"] == 73
+        assert mock_pipeline.call_args.kwargs["limit"] is None
+
+    def test_run_session_explicit_hours_and_limit_pass_through(self):
+        with patch("v2.session.run_backfill"), \
+             patch("v2.session.compute_signal_attribution", return_value=[]), \
+             patch("v2.session.build_attribution_constraints", return_value=""), \
+             patch("v2.session.run_pipeline") as mock_pipeline, \
+             patch("v2.session.run_strategist_loop"), \
+             patch("v2.session.run_trading_session"):
+            run_session(dry_run=False, pipeline_hours=12, pipeline_limit=300)
+
+        assert mock_pipeline.call_args.kwargs["hours"] == 12
+        assert mock_pipeline.call_args.kwargs["limit"] == 300

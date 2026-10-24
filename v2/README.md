@@ -85,7 +85,7 @@ Session (4 stages)
 python -m v2.session --dry-run
 
 # Run individual stages
-python -m v2.pipeline --hours 24 --limit 300
+python -m v2.pipeline --hours 24            # whole window; --limit N keeps only the newest N
 python -m v2.ideation_claude
 python -m v2.trader --dry-run
 python -m v2.learn --days 60

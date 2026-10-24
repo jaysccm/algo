@@ -87,3 +87,24 @@ class TestResolveTicker:
         assert resolve_ticker("") is None
         assert resolve_ticker("   ") is None
         assert resolve_ticker("$") is None
+
+
+class TestJay173Aliases:
+    """Company names Haiku emitted instead of symbols (JAY-173). Each target
+    was checked against Alpaca's assets endpoint on 2026-10-24: active,
+    tradable US equities."""
+
+    def test_company_names_resolve_to_symbols(self):
+        from v2.tickers import resolve_ticker
+        expected = {
+            "COREWEAVE": "CRWV", "COREWF": "CRWV", "Circle": "CRCL", "FactSet": "FDS",
+            "NiSource": "NI", "RenaissanceRe": "RNR", "TERAWULF": "WULF",
+            "HEARTFLOW": "HTFL", "MasterCraft": "MCFT", "HEALTHCARE_REALTY": "HR",
+        }
+        for raw, symbol in expected.items():
+            assert resolve_ticker(raw) == symbol, raw
+
+    def test_private_companies_are_dropped(self):
+        from v2.tickers import resolve_ticker
+        for raw in ["SPACEX", "OpenAI", "ANTHROPIC", "XANADU", "FIRMUS", "DRIVEWEALTH"]:
+            assert resolve_ticker(raw) is None, raw

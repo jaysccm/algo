@@ -1,7 +1,17 @@
 {
   "_comment": "Ticker resolution map. `aliases` remaps LLM-emitted strings (often company names or pre-rename tickers) to their canonical Alpaca symbols. `drop` lists strings the LLM emits as if they were tickers but are actually group acronyms / economic indicators / agency names with no tradable equivalent worth catching. Entries are uppercased on load.",
   "aliases": {
-    "CARLSMED": "CARL"
+    "CARLSMED": "CARL",
+    "COREWEAVE": "CRWV",
+    "COREWF": "CRWV",
+    "CIRCLE": "CRCL",
+    "FACTSET": "FDS",
+    "NISOURCE": "NI",
+    "RENAISSANCERE": "RNR",
+    "TERAWULF": "WULF",
+    "HEARTFLOW": "HTFL",
+    "MASTERCRAFT": "MCFT",
+    "HEALTHCARE_REALTY": "HR"
   },
   "drop": [
     "FAANG", "MAANG", "MAGS", "MAG", "FAAMG", "BATX", "BAT",
@@ -9,6 +19,7 @@
     "CEO", "CFO", "CTO", "COO", "CIO", "CMO", "CISO",
     "SEC", "FDA", "FTC", "DOJ", "FBI", "CIA", "NSA", "EPA", "IRS",
     "GDP", "CPI", "PPI", "PCE", "PMI", "ISM",
-    "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "CNY"
+    "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "CNY",
+    "SPACEX", "OPENAI", "ANTHROPIC", "XANADU", "FIRMUS", "DRIVEWEALTH"
   ]
 }

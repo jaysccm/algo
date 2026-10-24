@@ -18,6 +18,7 @@ from .tools import (
     tool_adopt_thesis,
     tool_create_thesis,
     tool_get_active_theses,
+    tool_get_curated_news,
     tool_get_decision_history,
     tool_get_portfolio_state,
     tool_get_signal_attribution,
@@ -243,6 +244,9 @@ def _run_claude_loop(
         **TOOL_HANDLERS,
         "create_thesis": partial(tool_create_thesis, session_id=session_id),
         "adopt_thesis": partial(tool_adopt_thesis, session_id=session_id),
+        # Bind the session so the news-filter Haiku call is recorded as an
+        # agent_call event (JAY-168); the model never sees this argument.
+        "get_curated_news": partial(tool_get_curated_news, session_id=session_id),
         "resolve_watchlist_item": wl.make_resolve_handler(
             session_id=session_id, stage="ideation"
         ),

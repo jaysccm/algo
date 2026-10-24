@@ -115,3 +115,36 @@ class TestCurateSignals:
         result = curate_signals([], target_n=30, regime_context="x")
         assert result == []
         mock_call.assert_not_called()
+
+
+class TestNewsFilterTelemetry:
+    """The Haiku filter call must carry session/stage/purpose so it lands in
+    agent_events and cost accounting (JAY-168)."""
+
+    def test_call_haiku_passes_telemetry_kwargs(self):
+        from v2.news_filter import _call_haiku
+
+        captured = {}
+
+        def fake_call(client, **kwargs):
+            captured.update(kwargs)
+            return _mock_haiku_response({"top_ids": [1]})
+
+        with patch("v2.news_filter._call_with_retry", side_effect=fake_call), \
+                patch("v2.news_filter.get_claude_client"):
+            _call_haiku(messages=[{"role": "user", "content": "x"}], session_id=7, stage_name="ideation")
+
+        assert captured["session_id"] == 7
+        assert captured["stage_name"] == "ideation"
+        assert captured["purpose"] == "news_filter"
+
+    @patch("v2.news_filter._call_haiku")
+    def test_curate_signals_forwards_session_id(self, mock_call):
+        from v2.news_filter import curate_signals
+
+        mock_call.return_value = _mock_haiku_response({"top_ids": [1]})
+        curate_signals([_signal(1), _signal(2)], target_n=1, regime_context="x", session_id=9)
+
+        kwargs = mock_call.call_args.kwargs
+        assert kwargs["session_id"] == 9
+        assert kwargs["stage_name"] == "ideation"

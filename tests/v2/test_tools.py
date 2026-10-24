@@ -1338,7 +1338,7 @@ class TestToolGetCuratedNews:
         monkeypatch.setattr(
             tools,
             "curate_signals",
-            lambda signals, target_n, regime_context: [2, 4],
+            lambda signals, target_n, regime_context, **kw: [2, 4],
         )
         tools.reset_session()  # ensure cache is clean
 
@@ -1381,7 +1381,7 @@ class TestToolGetCuratedNews:
         ]
         captured = {}
 
-        def fake_curate(signals, target_n, regime_context):
+        def fake_curate(signals, target_n, regime_context, **kw):
             captured["signal_ids"] = [s["id"] for s in signals]
             return [s["id"] for s in signals]
 
@@ -1441,6 +1441,25 @@ class TestToolGetCuratedNews:
         tools.tool_get_curated_news(target_n=1)
 
         assert called["count"] == 2, "reset_session must clear the curated-news cache"
+
+    def test_session_id_reaches_curate_signals(self, monkeypatch):
+        from v2 import tools
+
+        rows = [self._row(i) for i in range(1, 6)]
+        captured = {}
+
+        def fake_curate(signals, target_n, regime_context, **kw):
+            captured.update(kw)
+            return [1]
+
+        monkeypatch.setattr(tools, "get_news_signals", lambda **kw: rows)
+        monkeypatch.setattr(tools, "get_macro_context", lambda days: "x")
+        monkeypatch.setattr(tools, "curate_signals", fake_curate)
+        tools.reset_session()
+
+        tools.tool_get_curated_news(target_n=1, session_id=33)
+
+        assert captured.get("session_id") == 33
 
     def test_ticker_specific_passes_ticker_to_db(self, monkeypatch):
         from v2 import tools

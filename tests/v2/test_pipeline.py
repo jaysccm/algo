@@ -275,3 +275,19 @@ class TestPipelineSummaryPersistence:
         assert ticker_tuples[0][-1] == "Apple closed at $300 after the Foxconn deal.", (
             f"summary not at last position; tuple was {ticker_tuples[0]}"
         )
+
+
+class TestRunPipelineDefaultWindow:
+    @patch("v2.pipeline.fetch_broad_news")
+    def test_default_fetches_whole_window(self, mock_fetch):
+        """No limit by default: Alpaca is newest-first, so any cap drops the
+        oldest news in the window (the old 300 default was hit every day)."""
+        mock_fetch.return_value = []
+        run_pipeline()
+        mock_fetch.assert_called_once_with(hours=24, limit=None)
+
+    @patch("v2.pipeline.fetch_broad_news")
+    def test_explicit_limit_passes_through(self, mock_fetch):
+        mock_fetch.return_value = []
+        run_pipeline(hours=73, limit=500)
+        mock_fetch.assert_called_once_with(hours=73, limit=500)

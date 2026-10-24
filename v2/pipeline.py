@@ -20,14 +20,24 @@ class PipelineStats:
     errors: int
 
 
-def run_pipeline(hours: int = 24, limit: int = 300, dry_run: bool = False, session_id: int | None = None) -> PipelineStats:
-    """Run the news pipeline: fetch -> classify -> store."""
+def run_pipeline(
+    hours: int = 24, limit: int | None = None, dry_run: bool = False, session_id: int | None = None,
+) -> PipelineStats:
+    """Run the news pipeline: fetch -> classify -> store.
+
+    `limit=None` (the default) ingests the whole `hours` window. A numeric
+    limit keeps only the newest N items — Alpaca sorts newest-first — so
+    it silently discards the oldest part of the window; the old 300
+    default was hit every day and cut the window to a few hours.
+    """
     stats = PipelineStats(news_fetched=0, ticker_signals_stored=0,
                           macro_signals_stored=0, noise_dropped=0, errors=0)
 
     # Step 1: Fetch news from Alpaca
     news_items = fetch_broad_news(hours=hours, limit=limit)
     stats.news_fetched = len(news_items)
+    logger.info("pipeline: fetched %d news items (window=%dh, limit=%s)",
+                stats.news_fetched, hours, "none" if limit is None else limit)
 
     if not news_items:
         return stats
@@ -74,6 +84,13 @@ def run_pipeline(hours: int = 24, limit: int = 300, dry_run: bool = False, sessi
             logger.error("Error batch-inserting macro signals: %s", e)
             stats.errors += 1
 
+    logger.info(
+        "pipeline: %s ticker_signals=%d macro_signals=%d noise_dropped=%d errors=%d",
+        "dry-run, would store" if dry_run else "stored",
+        len(ticker_signals_batch) if dry_run else stats.ticker_signals_stored,
+        len(macro_signals_batch) if dry_run else stats.macro_signals_stored,
+        stats.noise_dropped, stats.errors,
+    )
     return stats
 
 
@@ -88,7 +105,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="Run news processing pipeline")
     parser.add_argument("--hours", type=int, default=24, help="Hours of news to fetch")
-    parser.add_argument("--limit", type=int, default=50, help="Max news items")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Keep only the newest N items (default: whole window)")
     parser.add_argument("--dry-run", action="store_true", help="Don't store to database")
 
     args = parser.parse_args()

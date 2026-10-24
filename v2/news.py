@@ -1,5 +1,6 @@
 """Alpaca news fetching."""
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,17 @@ try:
     from datetime import UTC
 except ImportError:  # pragma: no cover - Python < 3.11
     UTC = timezone.utc  # noqa: UP017
+
+logger = logging.getLogger(__name__)
+
+# Safety valve for "fetch the whole window" calls (limit=None). Alpaca sorts
+# newest-first, so whatever a cap cuts off is the *oldest* news in the window
+# — the previous afternoon's after-close earnings, overnight and weekend
+# items. The old session default of 300 was hit every single day (Alpaca
+# publishes ~2,400 items/day) and shrank the effective window to 1.5–9 hours.
+# 10,000 covers ~4 days of volume; a 7-day window after an outage can exceed
+# it, which the warning below makes visible instead of silent.
+NEWS_FETCH_CEILING = 10_000
 
 
 @dataclass
@@ -40,9 +52,16 @@ def get_news_client() -> NewsClient:
 def fetch_news(
     hours: int = 24,
     symbols: list[str] | None = None,
-    limit: int = 50
+    limit: int | None = 50
 ) -> list[NewsItem]:
-    """Fetch news from Alpaca News API."""
+    """Fetch news from Alpaca News API.
+
+    `limit=None` fetches the entire window (the SDK pages 50 items at a
+    time until Alpaca runs out), capped at NEWS_FETCH_CEILING as a safety
+    valve. Because results are newest-first, any cap drops the oldest
+    news in the window, so callers that care about coverage should pass
+    None rather than a round number.
+    """
     client = get_news_client()
 
     # T2.3: Alpaca returns aware UTC timestamps; the start filter must
@@ -51,9 +70,10 @@ def fetch_news(
     # cause "lost" news on hosts whose clock is not UTC.
     start_time = datetime.now(UTC) - timedelta(hours=hours)
 
+    effective_limit = NEWS_FETCH_CEILING if limit is None else limit
     request_params = {
         "start": start_time,
-        "limit": limit,
+        "limit": effective_limit,
         "sort": "desc"
     }
 
@@ -76,11 +96,22 @@ def fetch_news(
             url=news.url or ""
         ))
 
+    if limit is None and len(items) >= NEWS_FETCH_CEILING:
+        logger.warning(
+            "news: fetch hit NEWS_FETCH_CEILING=%d for a %dh window — the oldest "
+            "news in the window was dropped. Raise the ceiling or shorten the window.",
+            NEWS_FETCH_CEILING, hours,
+        )
+
     return items
 
 
-def fetch_broad_news(hours: int = 24, limit: int = 50) -> list[NewsItem]:
-    """Fetch broad market news without symbol filter."""
+def fetch_broad_news(hours: int = 24, limit: int | None = None) -> list[NewsItem]:
+    """Fetch broad market news without symbol filter.
+
+    Defaults to the whole window (limit=None); see fetch_news for why a
+    fixed cap is the wrong default for the ingestion path.
+    """
     return fetch_news(hours=hours, symbols=None, limit=limit)
 
 

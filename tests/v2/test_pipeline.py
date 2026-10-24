@@ -291,3 +291,32 @@ class TestRunPipelineDefaultWindow:
         mock_fetch.return_value = []
         run_pipeline(hours=73, limit=500)
         mock_fetch.assert_called_once_with(hours=73, limit=500)
+
+
+class TestTickerNoiseDropped:
+    @patch("v2.pipeline.insert_macro_signals_batch", return_value=0)
+    @patch("v2.pipeline.insert_news_signals_batch", return_value=1)
+    @patch("v2.pipeline.classify_news_batch")
+    @patch("v2.pipeline.fetch_broad_news")
+    def test_ticker_specific_noise_category_is_not_stored(
+        self, mock_fetch, mock_classify, mock_insert_ticker, mock_insert_macro,
+    ):
+        mock_fetch.return_value = [_make_news_item("a"), _make_news_item("b")]
+        noisy = TickerSignal(
+            ticker="AAPL", headline="a", category="noise",
+            sentiment="neutral", confidence="low", published_at=SAMPLE_PUBLISHED_AT,
+        )
+        real = TickerSignal(
+            ticker="MSFT", headline="b", category="earnings",
+            sentiment="bullish", confidence="high", published_at=SAMPLE_PUBLISHED_AT,
+        )
+        mock_classify.return_value = [
+            ClassificationResult(news_type="ticker_specific", ticker_signals=[noisy], macro_signal=None),
+            ClassificationResult(news_type="ticker_specific", ticker_signals=[real], macro_signal=None),
+        ]
+
+        stats = run_pipeline()
+
+        stored = mock_insert_ticker.call_args[0][0]
+        assert [row[0] for row in stored] == ["MSFT"]
+        assert stats.noise_dropped == 1

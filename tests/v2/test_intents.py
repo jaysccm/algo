@@ -144,6 +144,59 @@ class TestResolveBuyIntent:
         )
         assert shares == Decimal("50")
 
+    def test_min_buy_pct_raises_small_buy_to_floor(self):
+        # 2% floor on $100k → a $400 buy becomes $2k → 20 shares @ $100
+        intent = BuyIntent(type="invest_dollar", magnitude=Decimal("400"))
+        shares = resolve_buy_intent(
+            intent, held=Decimal("0"), price=Decimal("100"),
+            portfolio_value=Decimal("100000"), buying_power=Decimal("90000"),
+            min_buy_pct=Decimal("2"),
+        )
+        assert shares == Decimal("20")
+
+    def test_min_buy_pct_leaves_larger_buy_alone(self):
+        intent = BuyIntent(type="invest_dollar", magnitude=Decimal("5000"))
+        shares = resolve_buy_intent(
+            intent, held=Decimal("0"), price=Decimal("100"),
+            portfolio_value=Decimal("100000"), buying_power=Decimal("90000"),
+            min_buy_pct=Decimal("2"),
+        )
+        assert shares == Decimal("50")
+
+    def test_min_buy_pct_still_clamped_by_buying_power_and_position_cap(self):
+        intent = BuyIntent(type="invest_dollar", magnitude=Decimal("400"))
+        shares = resolve_buy_intent(
+            intent, held=Decimal("0"), price=Decimal("100"),
+            portfolio_value=Decimal("100000"), buying_power=Decimal("1000"),
+            min_buy_pct=Decimal("2"),
+        )
+        assert shares == Decimal("10")
+        # Hold $9.5k; MAX_POSITION_PCT headroom is $500, below the $2k floor
+        shares = resolve_buy_intent(
+            intent, held=Decimal("95"), price=Decimal("100"),
+            portfolio_value=Decimal("100000"), buying_power=Decimal("90000"),
+            min_buy_pct=Decimal("2"),
+        )
+        assert shares == Decimal("5")
+
+    def test_min_buy_pct_does_not_force_buy_when_target_met(self):
+        intent = BuyIntent(type="add_to_target_pct", magnitude=Decimal("3"))
+        shares = resolve_buy_intent(
+            intent, held=Decimal("40"), price=Decimal("100"),
+            portfolio_value=Decimal("100000"), buying_power=Decimal("90000"),
+            min_buy_pct=Decimal("2"),
+        )
+        assert shares == Decimal("0")
+
+    def test_min_buy_pct_zero_is_disabled(self):
+        intent = BuyIntent(type="invest_dollar", magnitude=Decimal("400"))
+        shares = resolve_buy_intent(
+            intent, held=Decimal("0"), price=Decimal("100"),
+            portfolio_value=Decimal("100000"), buying_power=Decimal("90000"),
+            min_buy_pct=Decimal("0"),
+        )
+        assert shares == Decimal("4")
+
     def test_invest_portfolio_pct(self):
         intent = BuyIntent(type="invest_portfolio_pct", magnitude=Decimal("2"))
         # $100k * 2% = $2000; @$200 = 10 shares

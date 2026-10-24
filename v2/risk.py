@@ -38,6 +38,13 @@ CHURN_PAIR_WINDOW_DAYS = 7
 # container restart required after changing. Set <= 0 to disable.
 DAILY_LOSS_LIMIT_PCT = Decimal(os.environ.get("ALGO_DAILY_LOSS_LIMIT_PCT", "3.0"))
 
+# Minimum buy size, % of portfolio value. Buy intents that resolve below it
+# are raised to it (still clamped by buying_power and MAX_POSITION_PCT). The
+# operator's sizing floor — learned rules can't size beneath it, which is how
+# the formation-era $200-$500 band outlived formation mode as a permanent
+# self-authored rule. Read at module import; <= 0 disables (default).
+MIN_BUY_PCT = Decimal(os.environ.get("ALGO_MIN_BUY_PCT", "0"))
+
 
 def check_sector_concentration(
     position_values: dict[str, Decimal],

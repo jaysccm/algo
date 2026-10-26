@@ -91,7 +91,7 @@ jobs:
       deploy: false
       test-command: docker run --rm --network none "$IMAGE" python -m compileall -q v2 trading dashboard
 
-  # Build/test on GitHub, then download the identical tested image on bee, whose
+  # Build/test on GitHub, then download the identical tested image on pearl, whose
   # ~/services/deploy.sh runs the guarded updater (HALT and timer state preserved).
   # Pin the shared workflow so a shared-repository merge cannot change our release path.
   release:
@@ -100,5 +100,5 @@ jobs:
     uses: jaysccm/actions/.github/workflows/release.yml@0a5b00b7bf58fe3ba0ae82d5ed27f94afe36ace9
     with:
       project: algo
-      deploy-host: bee
+      deploy-host: pearl
       test-command: docker run --rm --network none "$IMAGE" python -m compileall -q v2 trading dashboard

@@ -34,12 +34,16 @@ used. Targets are unprefixed (`up`, `down`, `session`, `db:migrate`,
 `db:backup`, `db:restore INSTANCE=x FILE=...`, `test`, etc.); there is no
 `paper:*` or `docker:*` target family.
 
-Planned instances at cutover: `live` (`DB_HOST_PORT=5432`,
-`DASHBOARD_HOST_PORT=3000`, public dashboard publishing disabled, trading
-HALT retained) and `paper` (`5433`/`3001`, publishes the public dashboard).
-This publisher switch is Jay's 2026-10-06 migration decision; jaywin's current
-env files still have the opposite flags until cutover. The paper env on bee
-must receive the Cloudflare settings before a publish is attempted.
+Instances on the production host (pearl): `live` (`DB_HOST_PORT=5432`,
+`DASHBOARD_HOST_PORT=3002` because pearl's Grafana holds 3000, public dashboard
+publishing disabled, trading HALT retained) and `paper` (`5433`/`3001`,
+publishes the public dashboard). Exactly one scheduled publisher may exist;
+the paper env needs the Cloudflare settings before a publish is attempted.
+Pinchy ran on jaywin, then bee, and has run on pearl since 2026-10-26; a push
+to `main` deploys there through `release.yml` (`deploy-host: pearl`). The
+updater that runs is the one already in the host checkout, so a change to
+`script/ext/update` or `Taskfile.yml` only takes effect on the deploy after the
+checkout has it.
 Each instance has its own compose
 project, Postgres volume, ports, and logs directory, so data never crosses
 between instances.

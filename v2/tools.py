@@ -307,6 +307,25 @@ def tool_close_thesis(thesis_id: int, status: str, reason: str) -> str:
         return f"Error: Thesis ID {thesis_id} not found"
 
 
+def _resolve_optional_ticker(raw: str | None) -> tuple[str | None, str | None]:
+    """Resolve an optional ticker filter. Returns (ticker, error_message).
+
+    No filter given -> (None, None). A filter that does not resolve returns an
+    error string instead of silently becoming the unfiltered all-ticker query,
+    so the strategist sees the rejection (JAY-172).
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, None
+    resolved = _norm_ticker(raw)
+    if resolved is None:
+        return None, (
+            f"Error: ticker {raw!r} is not a recognized equity symbol "
+            f"(group acronym, non-equity abbreviation, or malformed). "
+            f"Use the actual Alpaca-tradable symbol, or omit ticker for all news."
+        )
+    return resolved, None
+
+
 def tool_get_news_signals(ticker: str = None, days: int = 7) -> str:
     """Get recent ticker-specific news signals.
 
@@ -315,7 +334,9 @@ def tool_get_news_signals(ticker: str = None, days: int = 7) -> str:
     appear in tool output should not be cited — they will be stripped by
     validation at thesis-creation time.
     """
-    ticker = _norm_ticker(ticker)
+    ticker, error = _resolve_optional_ticker(ticker)
+    if error:
+        return error
     logger.info(f"Getting news signals (ticker: {ticker}, days: {days})")
     signals = get_news_signals(ticker=ticker, days=days)
 
@@ -352,7 +373,9 @@ def tool_get_curated_news(
     `session_id` is bound by the agentic loop (not exposed to the model)
     so the Haiku filter call lands in agent_events for cost accounting.
     """
-    ticker = _norm_ticker(ticker)
+    ticker, error = _resolve_optional_ticker(ticker)
+    if error:
+        return error
     cache_key = (ticker, days, target_n)
     cached_ids = _curated_news_cache.get(cache_key)
 

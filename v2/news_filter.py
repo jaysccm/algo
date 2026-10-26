@@ -19,11 +19,13 @@ import logging
 
 import anthropic
 
+from .classifier import _sanitize_headline, _sanitize_text
 from .claude_client import AgentPurpose, _call_with_retry, get_claude_client
 
 logger = logging.getLogger(__name__)
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
+_SUMMARY_MAX_CHARS = 600
 
 _SYSTEM_PROMPT = """You rank financial news signals by relevance for a trading strategist.
 
@@ -74,9 +76,9 @@ def _build_user_message(signals: list[dict], target_n: int, regime_context: str)
     for s in signals:
         line = (
             f"[#{s['id']}] {s.get('ticker','?')} {s.get('category','?')}/{s.get('sentiment','?')}: "
-            f"{s.get('headline','')}"
+            f"{_sanitize_headline(s.get('headline') or '')}"
         )
-        summary = s.get("summary")
+        summary = _sanitize_text(s.get("summary") or "", _SUMMARY_MAX_CHARS)
         if summary:
             line += f"\n  summary: {summary}"
         lines.append(line)
@@ -130,7 +132,16 @@ def curate_signals(
         logger.warning("Haiku response parse failed (%s); falling back to firehose", e)
         return fallback
 
-    valid_ids = [int(i) for i in raw_ids if isinstance(i, int) and i in input_ids]
+    # Accept digit strings too: Haiku sometimes quotes the IDs, and discarding
+    # them sent the whole firehose to the strategist (JAY-172).
+    candidates = [
+        int(i) if isinstance(i, str) and i.strip().isdigit() else i
+        for i in raw_ids
+    ]
+    valid_ids = [
+        i for i in candidates
+        if isinstance(i, int) and not isinstance(i, bool) and i in input_ids
+    ]
     if not valid_ids:
         logger.warning("Haiku returned no valid IDs (input=%d, returned=%d); falling back",
                        len(input_ids), len(raw_ids))

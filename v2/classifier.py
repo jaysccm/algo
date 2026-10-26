@@ -97,15 +97,19 @@ def _validate_category(value: str, allowed: frozenset, context: str) -> str | No
 # and tests below.
 
 
+def _sanitize_text(text: str, max_len: int) -> str:
+    """Strip control characters, collapse whitespace and truncate to max_len."""
+    text = re.sub(r'[\x00-\x1f\x7f]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:max_len]
+
+
 def _sanitize_headline(headline: str) -> str:
     """Sanitize a headline before inserting into an LLM prompt.
 
     Strips control characters, collapses whitespace, and truncates to 300 chars.
     """
-    headline = re.sub(r'[\x00-\x1f\x7f]', ' ', headline)
-    headline = re.sub(r'\s+', ' ', headline).strip()
-    headline = headline[:300]
-    return headline
+    return _sanitize_text(headline, 300)
 
 
 CLASSIFICATION_MODEL = "claude-haiku-4-5-20251001"

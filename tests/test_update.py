@@ -157,5 +157,17 @@ class UpdateTests(unittest.TestCase):
             self.assertIn(unittest.mock.call(name, f"algo:{self.old_ref}", *db_up), compose.call_args_list)
 
 
+class ReleaseEnvTests(unittest.TestCase):
+    def test_inherited_instance_is_dropped_so_env_file_wins(self):
+        # script/update exports INSTANCE="" to its hooks; compose would let that hide `INSTANCE=<name>` in the env file.
+        image = "algo:" + "3" * 40
+        with mock.patch.dict(os.environ, {"INSTANCE": "", "KEEP_ME": "yes"}):
+            env = update.release_env(image)
+        self.assertFalse("INSTANCE" in env, "release_env leaked an inherited INSTANCE")  # never print env: it may hold secrets
+        self.assertEqual(env["KEEP_ME"], "yes")
+        self.assertEqual(env["DEPLOY_IMAGE"], image)
+        self.assertIn("compose.release.yml", env["COMPOSE_FILE"])
+
+
 if __name__ == "__main__":
     unittest.main()

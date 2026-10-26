@@ -55,8 +55,11 @@ def call(*args: str, env: dict[str, str] | None = None, stdin: Path | None = Non
 
 
 def release_env(image: str) -> dict[str, str]:
+    # script/update (strta) exports INSTANCE="" for single-instance projects. Compose gives a shell variable priority
+    # over --env-file, so the empty value hides each instance's INSTANCE=<name> and `${INSTANCE:?}` fails. Every
+    # compose and task call below names its instance explicitly, so none may inherit one.
     return {
-        **os.environ,
+        **{key: value for key, value in os.environ.items() if key != "INSTANCE"},
         "DEPLOY_IMAGE": image,
         "COMPOSE_FILE": f"{ROOT / 'docker-compose.yml'}:{ROOT / 'compose.release.yml'}",
     }

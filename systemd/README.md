@@ -1,12 +1,13 @@
 # Pinchy systemd jobs
 
-These units mirror the installed jaywin cron schedule observed on 2026-10-06.
-They are source files for the eventual bee deployment; adding them to the
-repository does not install or enable a timer.
+These units mirror the jaywin cron schedule observed on 2026-10-06 and are
+installed on pearl, the production host since 2026-10-26 (bee ran them from
+2026-10-07 until then). Adding or changing them in the repository does not
+install, change or enable a timer; that is a reviewed host step.
 
 | Timer | Local time (America/Denver) | Cutover state |
 | --- | --- | --- |
-| `pinchy-paper-session.timer` | Weekdays 12:30 | Enable only after jaywin's paper cron is disabled and bee's paper smoke passes |
+| `pinchy-paper-session.timer` | Weekdays 12:30 | Enabled on pearl; enable on a new host only after the previous host's timer is disabled |
 | `pinchy-live-backup.timer` | Weekdays 20:00 | Enable after backup and restore rehearsal |
 | `pinchy-paper-backup.timer` | Weekdays 20:05 | Enable after backup and restore rehearsal |
 | `pinchy-live-session.timer` | Weekdays 13:00 | Keep disabled; `instances/live.HALT` stays present |
@@ -18,10 +19,10 @@ services expect the checkout at `/home/jay/services/algo`, go-task at
 `/home/jay/.local/bin/task`, and instance files plus `.env.host` on that host.
 Verify those paths and file permissions before installing. The source host's
 `instances/live.HALT` must be present in the destination checkout.
-At cutover, set `ALGO_DASHBOARD_PUBLISH=true` and the Cloudflare Pages
-settings in bee's paper env, and `ALGO_DASHBOARD_PUBLISH=false` in bee's live
-env. Keep exactly one scheduled publisher; jaywin currently has the opposite
-flags and its paper job must be disabled before bee's timer is enabled.
+On the production host, set `ALGO_DASHBOARD_PUBLISH=true` and the Cloudflare
+Pages settings in the paper env, and `ALGO_DASHBOARD_PUBLISH=false` in the live
+env. Keep exactly one scheduled publisher; the previous host's paper job and
+timer must be disabled before the new host's timer is enabled.
 The updater must write a checked, prebuilt tag such as `algo:<40-hex-commit>`
 to the gitignored `.release-image` file. The job wrapper rejects a missing or
 invalid tag and sets the release Compose override for Taskfile/Compose commands.
@@ -40,8 +41,7 @@ and database restore are separate from this routine updater.
 
 Installation should copy the unit files into `/etc/systemd/system/` and run
 `systemctl daemon-reload`, leaving all timers disabled until the data and
-schedule cutover. Enabling a timer before disabling the corresponding jaywin
-cron entry can produce overlapping work against the same Alpaca account.
+schedule cutover. Enabling a timer before disabling the corresponding timer or cron entry on the previous host can produce overlapping work against the same Alpaca account.
 
 ## Standard scripts (JAY-147)
 
